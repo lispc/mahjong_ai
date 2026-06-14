@@ -16,6 +16,7 @@ import agent
 from algo.agents.expectimax_eval2 import ExpectiMaxEval2Agent
 from algo.agents.mcts import MCTSAgent
 from algo.agents.baseline_plus import BaselinePlusAgent
+from algo.agents.prob_efficiency import ProbEfficiencyAgent
 from algo.agents.shanten_ukeire import (
     ShantenUkeireAgent, ShantenUkeireV3Agent
 )
@@ -86,6 +87,27 @@ def make_baseline_plus_noten_noend():
                              endgame_threshold=0)
 
 
+def make_prob_eff():
+    return ProbEfficiencyAgent('ProbEff', verbose=False)
+
+
+def make_prob_eff_exp():
+    return ProbEfficiencyAgent('ProbEffExp', verbose=False,
+                               use_expectation=True)
+
+
+def make_prob_eff_aggr():
+    return ProbEfficiencyAgent('ProbEffAggr', verbose=False,
+                               lambda_def_base=0.2,
+                               lambda_tenpai_opponent=0.8)
+
+
+def make_prob_eff_safe():
+    return ProbEfficiencyAgent('ProbEffSafe', verbose=False,
+                               lambda_def_base=1.0,
+                               lambda_tenpai_opponent=2.5)
+
+
 AGENTS = {
     'baseline': make_baseline,
     'baseline_plus': make_baseline_plus,
@@ -94,6 +116,10 @@ AGENTS = {
     'baseline_plus_noten': make_baseline_plus_noten,
     'baseline_plus_noend': make_baseline_plus_noend,
     'baseline_plus_noten_noend': make_baseline_plus_noten_noend,
+    'prob_eff': make_prob_eff,
+    'prob_eff_exp': make_prob_eff_exp,
+    'prob_eff_aggr': make_prob_eff_aggr,
+    'prob_eff_safe': make_prob_eff_safe,
     'eval2ctx': make_eval2ctx,
     'mcts': make_mcts,
     'su_d0': make_su_d0,
@@ -112,6 +138,10 @@ DISPLAY_NAMES = {
     'baseline_plus_noten': 'Baseline+noTen',
     'baseline_plus_noend': 'Baseline+noEnd',
     'baseline_plus_noten_noend': 'Baseline+noTnoE',
+    'prob_eff': 'ProbEff',
+    'prob_eff_exp': 'ProbEffExp',
+    'prob_eff_aggr': 'ProbEffAggr',
+    'prob_eff_safe': 'ProbEffSafe',
     'eval2ctx': 'Eval2Ctx',
     'mcts': 'MCTS',
     'su_d0': 'SU-d0',

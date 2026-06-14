@@ -299,6 +299,37 @@ Input(34 * channels) -> Conv1D/BN/ReLU -> Conv1D/BN/ReLU
 
 ---
 
+## 9. 方案 A 实现速报
+
+已实现 `algo/agents/prob_efficiency.py` 中的 `ProbEfficiencyAgent`。
+
+### 实现要点
+
+- **进攻**：基础分使用 `eval_v2.evaluate(hand13)`，额外加上
+  - 未听牌时的 `ukeire` 奖励；
+  - 听牌后的“实际剩余待牌张数”奖励（比 `tenpai_tiles` 更能反映尾盘真实情况）。
+- **防守**：使用 `algo.eval.opponent.tile_danger`，基于现物、筋牌、对手报听信号。
+- **动态 lambda**：`lambda_def = base + 1.5 * n_tenpai_opponents + 0.5 * game_progress`。
+- **报听**：听牌必报（符合当前决策）。
+- **可选 1-ply 期望**：`use_expectation=True` 时，按真实剩余概率枚举下一张摸牌并加权。
+
+### 200 局 benchmark（vs Baseline / Baseline+ / SUv3-d2）
+
+| Agent | 胜率 | 自摸 | 铳和 | 点炮 | Elo | 平均决策时间 |
+|-------|------|------|------|------|-----|--------------|
+| Baseline | 30.0% | 8.0% | 22.0% | 13.5% | 1530 | 232.2 ms |
+| Baseline+ | 30.0% | 8.0% | 22.0% | 19.0% | 1525 | 211.4 ms |
+| **ProbEffExp** | **9.5%** | 2.5% | 7.0% | 23.0% | 1479 | **34.0 ms** |
+| SUv3-d2 | 25.0% | 6.0% | 19.0% | 14.5% | 1466 | 3.0 ms |
+
+### 结论
+
+- `ProbEff` 是一个**干净、可解释、快**的方案 A baseline，但静态评估上限明显，目前无法超越 Baseline 的 `eval2` 2-ply 期望。
+- 1-ply 期望版比静态版强，但计算量增加后仍不及 Baseline。
+- 要真正超越 Baseline，需要在方案 A 基础上加入更深的搜索（方案 B）或更强的学习价值函数（方案 D）。
+
+---
+
 ## 参考资源
 
 - Li et al., *Suphx: Mastering Mahjong with Deep Reinforcement Learning*, 2020. https://arxiv.org/abs/2003.13590

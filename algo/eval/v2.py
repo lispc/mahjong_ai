@@ -377,6 +377,44 @@ def tenpai_tiles(hand):
     return cnt
 
 
+def winning_tiles(hand, remaining=None):
+    """
+    返回 hand（13张）的待牌列表。
+    remaining 为剩余张数字典；若未提供，则只返回不同牌种类。
+    """
+    if shanten_fast(hand) != 0:
+        return []
+    out = []
+    counts = _count(hand)
+    for t in VALID_TILES:
+        if counts[t] >= 4:
+            continue
+        if remaining is not None and remaining.get(t, 0) <= 0:
+            continue
+        if is_win(hand + [t]):
+            out.append(t)
+    return out
+
+
+def ukeire(hand, remaining):
+    """
+    计算手牌的有效进张数（Ukeire）：摸到哪张牌能让向听数下降，
+    并把这些牌的剩余张数加权求和。
+
+    hand: 13 张手牌
+    remaining: 牌 -> 剩余张数 的字典
+    """
+    s = shanten_fast(hand)
+    total = 0
+    for t in VALID_TILES:
+        cnt = remaining.get(t, 0)
+        if cnt <= 0:
+            continue
+        if shanten_fast(hand + [t]) < s:
+            total += cnt
+    return total
+
+
 # ---------------------------------------------------------------------------
 # 综合评估
 # ---------------------------------------------------------------------------
