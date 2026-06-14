@@ -1,4 +1,14 @@
-tmp
+tmp/*
+!tmp/.gitkeep
 __pycache__/
+*.py[cod]
+*.so
+*.o
+*.c
+*.h
+*.bak
+*.pkl
 .idea/
-output
+output/
+output_old/
+build/

@@ -1,3 +1,6 @@
+import sys
+sys.path.insert(0, '/Users/zhangzhuo/repos/personal/mahjong_ai')
+
 from tile import *
 from utils import *
 from algo import *

@@ -46,5 +46,12 @@ class Agent:
             print('出牌:' + tile.tile_to_str(result))
         return result
 
+    def declare_tenpai(self, hand, context):
+        """
+        返回是否报听。hand 为弃牌后的 13 张手牌。
+        基类默认不报听；子类可覆盖。
+        """
+        return False
+
     def print(self):
         print(self.name + ':' + tile.display_tiles(self.cur))
