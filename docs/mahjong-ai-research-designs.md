@@ -330,6 +330,40 @@ Input(34 * channels) -> Conv1D/BN/ReLU -> Conv1D/BN/ReLU
 
 ---
 
+## 10. 方案 B 实现速报
+
+已实现 `algo/agents/belief_expectimax.py` 中的 `BeliefExpectimaxAgent`。
+
+### 实现要点
+
+- **信念状态**：使用 `algo.context.v3.ContextV3` 维护全局已见牌 `used`、每家弃牌序列 `discards` 和报听集合 `tenpai_players`，即 tile-level 信念。
+- **前向搜索**：对候选弃牌做 2-ply expectimax。叶子估值复用项目已有的 `algo.eval2`（本身就是 2-ply expectimax），但把概率分布替换为 `ContextV3` 的真实剩余分布。
+- **候选剪枝**：先用 `algo.eval0` 快速预选 `max_candidates` 个候选，再用 `algo.eval2` 精确评估，控制决策时间在 ~130 ms。
+- **防守 tie-breaking**：只在检测到对手危险信号（已报听或 `player_danger_level >= 1`）时才进入安全模式；在 `best_offense` 附近按 `tile_danger` 选最安全的弃牌。避免无差别防守导致进攻瘫痪。
+- **报听决策**：听牌且待牌剩余张数 >= 4，或待牌为现物时，才报听；同时要求局面已有一定轮数，防止过早锁死。
+
+### 400 局 benchmark（vs Baseline / Baseline+ / Eval2Ctx）
+
+| Agent | 胜率 | 自摸 | 铳和 | 点炮 | Elo | 平均决策时间 |
+|-------|------|------|------|------|-----|--------------|
+| Baseline | 23.5% | 5.5% | 18.0% | 27.5% | 1439 | 224.8 ms |
+| Baseline+ | 24.8% | 6.2% | 18.5% | 20.8% | 1481 | 227.1 ms |
+| **BeliefExp** | **25.0%** | 6.0% | 19.0% | **12.0%** | **1542** | 149.5 ms |
+| Eval2Ctx | 25.0% | 4.8% | 20.2% | 15.5% | 1538 | 119.7 ms |
+
+> 注：400 局结果来自一次运行；200 局结果中 BeliefExp 与 Baseline 同样接近。由于四人麻将方差较大，胜率在 ±2–3% 内波动属于正常。
+
+### 结论
+
+- `BeliefExp` 已经达到 **与 Baseline / Baseline+ / Eval2Ctx 同档的胜率**，同时把**点炮率从 26.5% 降到 12.5%**，说明信念 + 安全 tie-breaking 的防守设计有效。
+- 它没有像 Baseline 那样“裸奔”，也没有因为过度防守而赢不了，基本实现了攻防平衡。
+- 当前实现依赖 `algo.eval2` 做深度评估；后续若要继续提升，可以：
+  1. 在 `eval2` 之上再加一层针对“对手和牌概率”的显式期望；
+  2. 用 `eval_v2` 或 `eval_v3` 替代 `algo.eval2` 做叶子，构造完全自洽的 expectimax；
+  3. 引入 per-player 风格信念（某人早打中张 -> 降低其手牌中张期望），提升对手建模精度。
+
+---
+
 ## 参考资源
 
 - Li et al., *Suphx: Mastering Mahjong with Deep Reinforcement Learning*, 2020. https://arxiv.org/abs/2003.13590

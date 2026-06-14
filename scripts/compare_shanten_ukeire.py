@@ -17,6 +17,7 @@ from algo.agents.expectimax_eval2 import ExpectiMaxEval2Agent
 from algo.agents.mcts import MCTSAgent
 from algo.agents.baseline_plus import BaselinePlusAgent
 from algo.agents.prob_efficiency import ProbEfficiencyAgent
+from algo.agents.belief_expectimax import BeliefExpectimaxAgent
 from algo.agents.shanten_ukeire import (
     ShantenUkeireAgent, ShantenUkeireV3Agent
 )
@@ -108,6 +109,20 @@ def make_prob_eff_safe():
                                lambda_tenpai_opponent=2.5)
 
 
+def make_belief_exp():
+    return BeliefExpectimaxAgent('BeliefExp', verbose=False)
+
+
+def make_belief_exp_aggr():
+    return BeliefExpectimaxAgent('BeliefExpAggr', verbose=False,
+                                 defense_margin=0.06)
+
+
+def make_belief_exp_cautious():
+    return BeliefExpectimaxAgent('BeliefExpCautious', verbose=False,
+                                 defense_margin=0.015)
+
+
 AGENTS = {
     'baseline': make_baseline,
     'baseline_plus': make_baseline_plus,
@@ -120,6 +135,9 @@ AGENTS = {
     'prob_eff_exp': make_prob_eff_exp,
     'prob_eff_aggr': make_prob_eff_aggr,
     'prob_eff_safe': make_prob_eff_safe,
+    'belief_exp': make_belief_exp,
+    'belief_exp_aggr': make_belief_exp_aggr,
+    'belief_exp_cautious': make_belief_exp_cautious,
     'eval2ctx': make_eval2ctx,
     'mcts': make_mcts,
     'su_d0': make_su_d0,
@@ -142,6 +160,9 @@ DISPLAY_NAMES = {
     'prob_eff_exp': 'ProbEffExp',
     'prob_eff_aggr': 'ProbEffAggr',
     'prob_eff_safe': 'ProbEffSafe',
+    'belief_exp': 'BeliefExp',
+    'belief_exp_aggr': 'BeliefExpAggr',
+    'belief_exp_cautious': 'BeliefExpCautious',
     'eval2ctx': 'Eval2Ctx',
     'mcts': 'MCTS',
     'su_d0': 'SU-d0',
