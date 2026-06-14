@@ -364,6 +364,70 @@ Input(34 * channels) -> Conv1D/BN/ReLU -> Conv1D/BN/ReLU
 
 ---
 
+## 11. 方案 C 实现速报：Determinized MCTS
+
+已实现 `algo/agents/determinized_mcts.py` 中的 `DeterminizedMCTSAgent`，并在 `driver/engine.py` 中新增 `play_game_from_state` 以支持从任意中盘状态继续模拟。
+
+### 实现要点
+
+- **Determinization（采样世界）**：根据 `ContextV3` 的已见信息，把未知牌均匀随机分配给三名对手和牌山，保证与已见牌一致。
+- **候选剪枝**：先用 `algo.eval0` 预选 top_k 候选弃牌，减少每个世界需要评估的动作数。
+- **Rollout policy**：为了实时性，rollout 使用快速启发式 `_fast_rollout_select`，即对每个候选弃牌计算 `algo.eval0(hand13, empty context)` 并选最大者。
+- **收益设计**：
+  - 当前玩家和牌：+1
+  - 当前玩家点炮：-1
+  - 其他玩家和牌：-0.3（反映自己失去获胜机会）
+  - 流局：0
+- **安全 tie-breaking 的取舍**：当前版本把点炮风险显式放进 rollout 收益，而不是像 BeliefExp 那样做外部安全惩罚。
+
+### 100 局 benchmark（vs Baseline / BeliefExp / Eval2Ctx，n_worlds=4, top_k=6）
+
+| Agent | 胜率 | 自摸 | 铳和 | 点炮 | Elo | 平均决策时间 |
+|-------|------|------|------|------|-----|--------------|
+| Baseline | 31.0% | 11.0% | 20.0% | 18.0% | 1557 | 130.5 ms |
+| **BeliefExp** | **26.0%** | 9.0% | 17.0% | **13.0%** | 1504 | 86.1 ms |
+| Eval2Ctx | 27.0% | 5.0% | 22.0% | 19.0% | 1501 | 66.4 ms |
+| **DetMCTS** | **8.0%** | 1.0% | 7.0% | 16.0% | 1439 | 150.6 ms |
+
+> 把 `n_worlds` 提升到 8 后，决策时间增至 ~320 ms，但胜率仍在 6–10% 区间，说明当前实现尚未找到稳定收益。
+
+### 结论与后续方向
+
+- `DetMCTS` **实现上已跑通**，但目前胜率明显弱于 BeliefExp / Baseline / Eval2Ctx。主要原因：
+  1. **均匀随机 determinization** 没有利用对手弃牌信息做非均匀信念；
+  2. **快速 rollout policy**（eval0）太弱，无法准确估计一手弃牌在完整对局中的真实价值；
+  3. **采样数不足**（4–8 个世界）导致方差大，平均后选出平庸动作（strategy fusion）。
+- 后续若继续投入方案 C，优先尝试：
+  1. 用 `BeliefExp` 或 `Baseline+` 作为 rollout policy（牺牲实时性换强度）；
+  2. 引入对手建模的 **非均匀 determinization**（根据对手弃牌序列调整其手牌分布）；
+  3. 升级为 **IS-MCTS** 或增加 determinization 数量到 50+，并配合方差缩减技巧。
+
+---
+
+## 12. BeliefExp 超参调优
+
+已添加 `scripts/tune_belief_exp.py`，对 `defense_margin`、`max_candidates`、`tenpai_min_wait` 做随机网格搜索（默认 12 组参数 × 60 局）。
+
+### 部分结果
+
+| defense_margin | max_candidates | tenpai_min_wait | 胜率 | 点炮率 | 平均决策时间 |
+|----------------|----------------|-----------------|------|--------|--------------|
+| 0.0 | 12 | 2 | 20.0% | 20.0% | 173.8 ms |
+| 0.015 | 6 | 6 | 20.0% | 21.7% | 102.9 ms |
+| 0.015 | 12 | 2 | 18.3% | 23.3% | 174.5 ms |
+| 0.03 | 8 | 3 | 18.3% | 18.3% | 148.5 ms |
+| 0.1 | 8 | 2 | 15.0% | 13.3% | 122.9 ms |
+
+> 搜索在较强对手池（Baseline+ / Eval2Ctx）上进行，胜率绝对值低于对阵 Baseline 的 benchmark，但相对趋势仍有参考意义。
+
+### 结论
+
+- `defense_margin=0.0`（不主动安全 tie-breaking）在搜索中表现略好，但点炮率更高；
+- 各组参数差异在 60 局尺度上不够显著，说明 BeliefExp 对这几个超参不太敏感，已经处于一个较稳的局部最优；
+- 默认参数 `defense_margin=0.03, max_candidates=8, tenpai_min_wait=4` 在 400 局综合 benchmark 中表现均衡，仍作为默认设置。
+
+---
+
 ## 参考资源
 
 - Li et al., *Suphx: Mastering Mahjong with Deep Reinforcement Learning*, 2020. https://arxiv.org/abs/2003.13590

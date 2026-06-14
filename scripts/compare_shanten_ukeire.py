@@ -18,6 +18,7 @@ from algo.agents.mcts import MCTSAgent
 from algo.agents.baseline_plus import BaselinePlusAgent
 from algo.agents.prob_efficiency import ProbEfficiencyAgent
 from algo.agents.belief_expectimax import BeliefExpectimaxAgent
+from algo.agents.determinized_mcts import DeterminizedMCTSAgent
 from algo.agents.shanten_ukeire import (
     ShantenUkeireAgent, ShantenUkeireV3Agent
 )
@@ -123,6 +124,11 @@ def make_belief_exp_cautious():
                                  defense_margin=0.015)
 
 
+def make_det_mcts():
+    return DeterminizedMCTSAgent('DetMCTS', verbose=False,
+                                 n_worlds=8, top_k=6, max_workers=1)
+
+
 AGENTS = {
     'baseline': make_baseline,
     'baseline_plus': make_baseline_plus,
@@ -138,6 +144,7 @@ AGENTS = {
     'belief_exp': make_belief_exp,
     'belief_exp_aggr': make_belief_exp_aggr,
     'belief_exp_cautious': make_belief_exp_cautious,
+    'det_mcts': make_det_mcts,
     'eval2ctx': make_eval2ctx,
     'mcts': make_mcts,
     'su_d0': make_su_d0,
@@ -163,6 +170,7 @@ DISPLAY_NAMES = {
     'belief_exp': 'BeliefExp',
     'belief_exp_aggr': 'BeliefExpAggr',
     'belief_exp_cautious': 'BeliefExpCautious',
+    'det_mcts': 'DetMCTS',
     'eval2ctx': 'Eval2Ctx',
     'mcts': 'MCTS',
     'su_d0': 'SU-d0',
