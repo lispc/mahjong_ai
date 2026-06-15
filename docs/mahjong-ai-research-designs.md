@@ -470,6 +470,42 @@ Input(34 * channels) -> Conv1D/BN/ReLU -> Conv1D/BN/ReLU
 
 ---
 
+## 14. 方案 B 再升级：BeliefExpV3（自洽 expectimax + per-player 信念）
+
+已实现：
+- `algo/eval/player_belief.py`：per-player tile-level 信念模型；
+- `algo/agents/belief_expectimax_v3.py`：BeliefExpV3Agent。
+
+### 实现要点
+
+- **per-player tile 信念**：根据每名对手的弃牌序列推断其花色偏好，进而得到“某张牌实际还在牌山的期望张数”。
+- **自洽 expectimax**：不再调用 `algo.eval2`，而是显式枚举“摸牌 → 打牌”过程：
+  - 对每个候选弃牌得到 hand13；
+  - 按有效剩余张数加权枚举下一张摸牌；
+  - 摸到牌后从 14 张手牌中选最佳弃牌；
+  - 叶子节点用 `algo.eval0` 评估最终 hand13。
+- **防守**：沿用 V2 的 per-player 危险度聚合 + 安全 tie-breaking。
+
+### 100 局 benchmark（vs Baseline / BeliefExp / Eval2Ctx）
+
+| Agent | 胜率 | 自摸 | 铳和 | 点炮 | Elo | 平均决策时间 |
+|-------|------|------|------|------|-----|--------------|
+| Baseline | 30.0% | 7.0% | 23.0% | 25.0% | 1632 | 122.5 ms |
+| BeliefExp | 24.0% | 5.0% | 19.0% | 15.0% | 1537 | 89.2 ms |
+| **BeliefExpV3** | **19.0%** | 5.0% | 14.0% | 18.0% | 1456 | 169.0 ms |
+| Eval2Ctx | 22.0% | 5.0% | 17.0% | 15.0% | 1375 | 68.7 ms |
+
+### 结论
+
+- BeliefExpV3 **实现上跑通**，但目前 100 局胜率略低于 BeliefExp（19% vs 24%），决策时间也更高（169 ms）。
+- 原因可能是：
+  1. `algo.eval0` 叶子虽强，但一层“摸+打”的 expectimax 还不足以抵消 `algo.eval2` 内部两层 draw 期望的信息优势；
+  2. per-player 信念模型目前偏启发式，对有效进张的折扣有时过于悲观，导致进攻节奏变慢；
+  3. 搜索深度和候选数受实时性限制，未能充分发挥 expectimax 的潜力。
+- 这部分工作为后续 **NN 估值函数** 提供了接口：一旦用 NN 替代 `algo.eval0` 做叶子，同样的 expectimax 框架会显著提升。
+
+---
+
 ## 参考资源
 
 - Li et al., *Suphx: Mastering Mahjong with Deep Reinforcement Learning*, 2020. https://arxiv.org/abs/2003.13590
