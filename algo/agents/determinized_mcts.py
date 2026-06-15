@@ -127,6 +127,84 @@ def _simulate_one(args):
 
 
 # ---------------------------------------------------------------------------
+# BeliefExp hybrid rollout worker
+# ---------------------------------------------------------------------------
+
+def _simulate_one_belief(args):
+    """
+    使用 BeliefExpectimaxAgent 作为当前玩家的 rollout policy，
+    对手仍用 _fast_rollout_select。
+    """
+    from algo.agents.belief_expectimax import BeliefExpectimaxAgent
+
+    (candidate, current_hand, opp_hands, wall,
+     public_ctx_dict, locked_indices, rollout_depth) = args
+
+    ctx = context_v3.ContextV3()
+    ctx.used = public_ctx_dict['used'].copy()
+    ctx.all_seen = public_ctx_dict['all_seen'].copy()
+    ctx.discards = {p: list(seq) for p, seq in public_ctx_dict['discards'].items()}
+    ctx.tenpai_players = set(public_ctx_dict['tenpai_players'])
+
+    # 当前玩家用 BeliefExpectimaxAgent 作为 rollout policy
+    cur = BeliefExpectimaxAgent('cur', verbose=False)
+    cur_hand = list(current_hand)
+    cur_hand.remove(candidate)
+    cur.init_tiles(cur_hand)
+    cur.context = ctx.copy()
+
+    opps = [list(opp_hands[0]), list(opp_hands[1]), list(opp_hands[2])]
+    opp_names = ['opp1', 'opp2', 'opp3']
+    wall = list(wall)
+    turn = 1
+    locked = set(locked_indices)
+
+    max_steps = rollout_depth if rollout_depth > 0 else 10000
+    step = 0
+
+    while wall and step < max_steps:
+        drawn = wall.pop(0)
+
+        if turn == 0:
+            if cur.add(drawn):
+                return 1.0
+            discarded = cur.next()  # 内部已经更新 cur.context
+        else:
+            opp_idx = turn - 1
+            opps[opp_idx].append(drawn)
+            if eval_v2.is_win(opps[opp_idx]):
+                return -0.3
+            discarded = _fast_rollout_select(opps[opp_idx])
+            opps[opp_idx].remove(discarded)
+            # 让当前玩家看到对手弃牌，更新信念
+            cur.context.see_tile(discarded, opp_names[opp_idx])
+
+        # 点炮检查
+        for j in range(4):
+            if j == turn:
+                continue
+            if j == 0:
+                if eval_v2.is_win(list(cur.cur) + [discarded]):
+                    return 1.0
+            else:
+                if eval_v2.is_win(opps[j - 1] + [discarded]):
+                    if turn == 0:
+                        return -1.0
+                    return -0.3
+
+        turn = (turn + 1) % 4
+        step += 1
+
+    # 截断启发式：根据当前玩家手牌向听数估计价值
+    sh = eval_v2.shanten(cur.cur)
+    rem = cur.context.remaining_wall(cur.cur)
+    waits = eval_v2.winning_tiles(cur.cur, rem)
+    wait_count = sum(rem.get(t, 0) for t in waits)
+    value = -1.0 + 2.0 * max(0.0, (5.0 - sh) / 5.0) + 0.05 * wait_count
+    return min(1.0, value)
+
+
+# ---------------------------------------------------------------------------
 # Agent
 # ---------------------------------------------------------------------------
 
@@ -146,13 +224,15 @@ class DeterminizedMCTSAgent(agent.Agent):
                  n_rollouts_per_world=1,
                  max_workers=1,
                  rollout_depth=0,
-                 top_k=6):
+                 top_k=6,
+                 belief_exp_rollout=False):
         super().__init__(name, verbose)
         self.n_worlds = n_worlds
         self.n_rollouts_per_world = n_rollouts_per_world
         self.max_workers = max_workers
         self.rollout_depth = rollout_depth
         self.top_k = top_k
+        self.belief_exp_rollout = belief_exp_rollout
         self.context = context_v3.ContextV3()
 
     def init_tiles(self, l):
@@ -243,11 +323,12 @@ class DeterminizedMCTSAgent(agent.Agent):
                     tasks.append((candidate, list(self.cur), opp_hands, wall,
                                   public_ctx, [], self.rollout_depth))
 
+        sim_fn = _simulate_one_belief if self.belief_exp_rollout else _simulate_one
         if self.max_workers <= 1:
-            rewards = list(map(_simulate_one, tasks))
+            rewards = list(map(sim_fn, tasks))
         else:
             with ProcessPoolExecutor(max_workers=self.max_workers) as executor:
-                rewards = list(executor.map(_simulate_one, tasks))
+                rewards = list(executor.map(sim_fn, tasks))
 
         # 按候选聚合平均收益
         sums = {d: 0.0 for d in candidates}

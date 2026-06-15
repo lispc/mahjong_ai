@@ -364,7 +364,33 @@ Input(34 * channels) -> Conv1D/BN/ReLU -> Conv1D/BN/ReLU
 
 ---
 
-## 11. 方案 C 实现速报：Determinized MCTS
+## 11. 方案 B 优化版：BeliefExpV2
+
+已实现 `algo/agents/belief_expectimax_v2.py` 中的 `BeliefExpectimaxV2Agent`。
+
+### 改进点
+
+- **per-player 危险度聚合**：不再用全局 `tile_danger` 做安全 tie-breaking，而是对每个对手分别计算 `tile_danger_for_player`，并按 `player_danger_level` 加权聚合。这样能把“某个对手明显在做筒子”这类信息反映到防守决策中。
+- 其余进攻框架（eval0 预选、eval2 精确评估、安全 tie-breaking）与 BeliefExp 保持一致。
+
+### 100 局 benchmark（vs Baseline / BeliefExp / Eval2Ctx）
+
+| Agent | 胜率 | 自摸 | 铳和 | 点炮 | Elo | 平均决策时间 |
+|-------|------|------|------|------|-----|--------------|
+| Baseline | 28.0% | 6.0% | 22.0% | 26.0% | 1607 | 114.7 ms |
+| BeliefExp | 24.0% | 4.0% | 20.0% | 17.0% | 1515 | 74.7 ms |
+| **BeliefExpV2** | **22.0%** | 4.0% | 18.0% | **14.0%** | 1466 | 75.3 ms |
+| Eval2Ctx | 21.0% | 8.0% | 13.0% | 16.0% | 1412 | 58.0 ms |
+
+### 结论
+
+- BeliefExpV2 在胜率上与 BeliefExp 基本持平，但把**点炮率从 17% 进一步降到 14%**，说明 per-player 危险度聚合确实提升了防守精度。
+- 代价是略低的铳和率，总体更偏稳健。
+- 由于 BeliefExp 本身已经很强，V2 的提升幅度有限；后续若继续优化，可以尝试把 per-player 信念也用于进攻端的 tile probability（替换 `algo.eval2` 的均匀假设）。
+
+---
+
+## 12. 方案 C 实现速报：Determinized MCTS
 
 已实现 `algo/agents/determinized_mcts.py` 中的 `DeterminizedMCTSAgent`，并在 `driver/engine.py` 中新增 `play_game_from_state` 以支持从任意中盘状态继续模拟。
 
@@ -391,6 +417,22 @@ Input(34 * channels) -> Conv1D/BN/ReLU -> Conv1D/BN/ReLU
 
 > 把 `n_worlds` 提升到 8 后，决策时间增至 ~320 ms，但胜率仍在 6–10% 区间，说明当前实现尚未找到稳定收益。
 
+### DetMCTS-V2：BeliefExp hybrid rollout
+
+已进一步实现 **BeliefExp 作为当前玩家 rollout policy** 的版本（`belief_exp_rollout=True`），对手仍用快速 eval0 policy，并加入截断启发式。
+
+20 局测试（n_worlds=3, top_k=4, rollout_depth=16）：
+
+| Agent | 胜率 | 自摸 | 铳和 | 点炮 | Elo | 平均决策时间 |
+|-------|------|------|------|------|-----|--------------|
+| Baseline | 20.0% | 0.0% | 20.0% | 25.0% | 1507 | 123.3 ms |
+| BeliefExp | 25.0% | 5.0% | 20.0% | 10.0% | 1472 | 84.4 ms |
+| Eval2Ctx | 35.0% | 0.0% | 35.0% | 20.0% | 1570 | 62.5 ms |
+| **DetMCTSV2** | **10.0%** | 0.0% | 10.0% | 30.0% | 1450 | **1607.2 ms** |
+
+- 决策时间 ~1.6 s，尚未具备在线实用性。
+- 胜率仍低于 BeliefExp，说明单纯把当前玩家 rollout 换成 BeliefExp、且只模拟 16 回合，还不足以弥补 determinization 和 opponent rollout 的不足。
+
 ### 结论与后续方向
 
 - `DetMCTS` **实现上已跑通**，但目前胜率明显弱于 BeliefExp / Baseline / Eval2Ctx。主要原因：
@@ -398,13 +440,13 @@ Input(34 * channels) -> Conv1D/BN/ReLU -> Conv1D/BN/ReLU
   2. **快速 rollout policy**（eval0）太弱，无法准确估计一手弃牌在完整对局中的真实价值；
   3. **采样数不足**（4–8 个世界）导致方差大，平均后选出平庸动作（strategy fusion）。
 - 后续若继续投入方案 C，优先尝试：
-  1. 用 `BeliefExp` 或 `Baseline+` 作为 rollout policy（牺牲实时性换强度）；
+  1. 用 **BeliefExp 或 Baseline+ 作为所有玩家的 rollout policy**（牺牲实时性换强度）；
   2. 引入对手建模的 **非均匀 determinization**（根据对手弃牌序列调整其手牌分布）；
   3. 升级为 **IS-MCTS** 或增加 determinization 数量到 50+，并配合方差缩减技巧。
 
 ---
 
-## 12. BeliefExp 超参调优
+## 13. BeliefExp 超参调优
 
 已添加 `scripts/tune_belief_exp.py`，对 `defense_margin`、`max_candidates`、`tenpai_min_wait` 做随机网格搜索（默认 12 组参数 × 60 局）。
 
