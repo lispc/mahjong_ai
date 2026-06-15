@@ -8,10 +8,15 @@ import pickle
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import agent
 from algo.agents.belief_expectimax import BeliefExpectimaxAgent
 from algo.agents.belief_expectimax_v3 import BeliefExpectimaxV3Agent
 from driver.tournament import run_tournament
 from checker.report import generate_report, compute_metrics, compute_elo
+
+
+def make_baseline():
+    return agent.Agent('Baseline', verbose=False)
 
 
 def make_beliefexp():
@@ -28,8 +33,8 @@ def make_v3_nn():
                                    max_candidates=5, leaf_evaluator='nn')
 
 
-AGENTS_CONFIG = [make_beliefexp, make_v3_eval0, make_v3_nn]
-AGENT_NAMES = ['BeliefExp', 'V3-eval0', 'V3-NN']
+AGENTS_CONFIG = [make_baseline, make_beliefexp, make_v3_eval0, make_v3_nn]
+AGENT_NAMES = ['Baseline', 'BeliefExp', 'V3-eval0', 'V3-NN']
 
 
 def main():

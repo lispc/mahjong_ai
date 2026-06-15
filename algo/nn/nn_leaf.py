@@ -15,7 +15,7 @@ import algo
 import context as ctx_module
 
 from algo.nn.model import MahjongNet
-from algo.nn.value_model import MahjongValueNet
+from algo.nn.value_model import MahjongValueNet, MahjongValueNetDeep
 from algo.nn.features import extract_features, _context_features, _hand_to_array
 
 
@@ -35,7 +35,20 @@ def _load_model():
         return _MODEL, _CONFIG
     out_dir = 'output'
 
-    # 优先使用独立训练的价值网络
+    # 1) 优先使用 MC rollout 训练出的深度价值网络
+    mc_config_path = os.path.join(out_dir, 'nn_value_model_mc_config.json')
+    mc_weights_path = os.path.join(out_dir, 'nn_value_model_mc.npz')
+    if os.path.exists(mc_config_path) and os.path.exists(mc_weights_path):
+        with open(mc_config_path, 'r') as f:
+            _CONFIG = json.load(f)
+        if _CONFIG.get('arch') == 'deep':
+            _MODEL = MahjongValueNetDeep(_CONFIG['input_dim'])
+        else:
+            _MODEL = MahjongValueNet(_CONFIG['input_dim'], _CONFIG.get('hidden_dim', 256))
+        _MODEL.load_weights(mc_weights_path)
+        return _MODEL, _CONFIG
+
+    # 2) 其次使用独立训练的价值网络
     value_config_path = os.path.join(out_dir, 'nn_value_model_config.json')
     value_weights_path = os.path.join(out_dir, 'nn_value_model.npz')
     if os.path.exists(value_config_path) and os.path.exists(value_weights_path):
@@ -45,7 +58,7 @@ def _load_model():
         _MODEL.load_weights(value_weights_path)
         return _MODEL, _CONFIG
 
-    # 回退到 policy-value 网络的 value head
+    # 3) 回退到 policy-value 网络的 value head
     config_path = os.path.join(out_dir, 'nn_model_config.json')
     weights_path = os.path.join(out_dir, 'nn_model.npz')
     if not os.path.exists(config_path) or not os.path.exists(weights_path):

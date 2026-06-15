@@ -19,5 +19,12 @@ class DataCollectorBeliefExp(BeliefExpectimaxAgent):
         assert len(self.cur) == 14
         features = extract_features(self.context, self.cur, self.name)
         disc = super().next()
-        self.buffer.append((features, tile_to_index(disc)))
+        # 保存完整 snapshot，方便后续计算 MC rollout value label
+        self.buffer.append({
+            'features': features,
+            'action': tile_to_index(disc),
+            'context': self.context.copy(),
+            'hand': list(self.cur),
+            'name': self.name,
+        })
         return disc

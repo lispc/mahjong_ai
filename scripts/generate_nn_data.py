@@ -18,6 +18,7 @@ from multiprocessing import Pool
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from algo.agents.data_collectors import DataCollectorBeliefExp
+from algo.nn import mc_value
 from driver import engine
 import random
 
@@ -48,7 +49,7 @@ def _outcome_for_agent(agent_name, result):
     return 0.0
 
 
-def _play_and_collect(seed):
+def _play_and_collect(seed, n_rollouts=0):
     """玩一局 BeliefExp 自对弈并返回该局全部样本。"""
     old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
     signal.alarm(_PER_GAME_TIMEOUT)
@@ -65,7 +66,14 @@ def _play_and_collect(seed):
         samples = []
         for a in agents:
             outcome = outcomes[a.name]
-            samples.extend([(features, action, outcome) for features, action in a.buffer])
+            for item in a.buffer:
+                if n_rollouts > 0:
+                    mc_v = mc_value.estimate_win_rate(
+                        item['context'], item['hand'], item['name'],
+                        n_rollouts=n_rollouts)
+                else:
+                    mc_v = outcome
+                samples.append((item['features'], item['action'], mc_v))
         return samples
     except GameTimeoutError:
         print(f'[timeout] seed={seed}', flush=True)
@@ -75,11 +83,16 @@ def _play_and_collect(seed):
         signal.signal(signal.SIGALRM, old_handler)
 
 
+def _play_and_collect_wrapper(args):
+    return _play_and_collect(*args)
+
+
 def main():
     n_games = int(sys.argv[1]) if len(sys.argv) > 1 else 500
     n_workers = int(sys.argv[2]) if len(sys.argv) > 2 else 4
     out_path = sys.argv[3] if len(sys.argv) > 3 else 'output/nn_training_data.npz'
     seed_offset = int(sys.argv[4]) if len(sys.argv) > 4 else 0
+    n_rollouts = int(sys.argv[5]) if len(sys.argv) > 5 else 0
 
     out_dir = os.path.dirname(out_path)
     if out_dir:
@@ -87,13 +100,15 @@ def main():
 
     start = time.time()
     print(f'Generating {n_games} games with BeliefExp self-play '
-          f'(workers={n_workers}, seed_offset={seed_offset}) ...')
+          f'(workers={n_workers}, seed_offset={seed_offset}, '
+          f'mc_rollouts={n_rollouts}) ...')
 
     all_samples = []
     completed = 0
     seeds = range(seed_offset, seed_offset + n_games)
+    tasks = [(seed, n_rollouts) for seed in seeds]
     with Pool(n_workers) as pool:
-        for samples in pool.imap_unordered(_play_and_collect, seeds):
+        for samples in pool.imap_unordered(_play_and_collect_wrapper, tasks):
             all_samples.extend(samples)
             completed += 1
             if completed % 50 == 0 or completed == n_games:
