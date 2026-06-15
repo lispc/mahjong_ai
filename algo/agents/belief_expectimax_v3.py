@@ -21,7 +21,26 @@ import algo.eval.v2 as eval_v2
 import algo.eval.v3 as eval_v3
 import algo.eval.opponent as opponent
 from algo.eval.player_belief import PlayerBelief
-from algo.nn import nn_leaf, nn_policy
+
+
+_NN_LEAF_MOD = None
+_NN_POLICY_MOD = None
+
+
+def _get_nn_leaf():
+    global _NN_LEAF_MOD
+    if _NN_LEAF_MOD is None:
+        from algo.nn import nn_leaf
+        _NN_LEAF_MOD = nn_leaf
+    return _NN_LEAF_MOD
+
+
+def _get_nn_policy():
+    global _NN_POLICY_MOD
+    if _NN_POLICY_MOD is None:
+        from algo.nn import nn_policy
+        _NN_POLICY_MOD = nn_policy
+    return _NN_POLICY_MOD
 
 
 WIN_VALUE = 100.0
@@ -33,7 +52,7 @@ _EMPTY_CONTEXT = ctx_module.Context()
 def _leaf_value_impl(hand, leaf_mode='eval0'):
     """叶子估值：eval0 或训练好的 NN value。"""
     if leaf_mode == 'nn':
-        return nn_leaf.nn_leaf_value(hand)
+        return _get_nn_leaf().nn_leaf_value(hand)
     return algo.eval0(hand, _EMPTY_CONTEXT)
 
 
@@ -87,6 +106,7 @@ class BeliefExpectimaxV3Agent(agent.Agent):
     参数：
         expectimax_depth: 1 表示“一次摸牌+一次打牌”的期望；2 表示两轮。
         max_candidates: 进入 expectimax 精确评估的候选弃牌数。
+        candidate_policy: 候选弃牌生成策略，'eval0' | 'nn' | 'baseline' | 'baseline_fast' | 'baseline_best' | 'baseline_rerank' | 'baseline_empty' | 'baseline_eval1'。
         weight_ukeire / weight_tenpai: 叶子节点奖励权重。
         defense_margin: 安全 tie-breaking 的进攻分允许差距。
     """
@@ -96,7 +116,7 @@ class BeliefExpectimaxV3Agent(agent.Agent):
                  max_candidates=8,
                  defense_margin=0.03,
                  leaf_evaluator='eval0',
-                 candidate_policy='eval0'):
+                 candidate_policy='baseline_eval1'):
         super().__init__(name, verbose)
         self.expectimax_depth = expectimax_depth
         self.max_candidates = max_candidates
@@ -183,7 +203,7 @@ class BeliefExpectimaxV3Agent(agent.Agent):
         unique_disc = self._unique_tiles(hand13)
         total = sum(effective_remaining.values())
         if total <= 0:
-            return nn_leaf.nn_leaf_value(hand13)
+            return _get_nn_leaf().nn_leaf_value(hand13)
 
         ev = 0.0
         for t, cnt in effective_remaining.items():
@@ -201,7 +221,7 @@ class BeliefExpectimaxV3Agent(agent.Agent):
                     continue
                 leaves.append(tuple(sorted([v for v in hand14 if v != x])))
 
-            values = nn_leaf.nn_leaf_values_batch(leaves)
+            values = _get_nn_leaf().nn_leaf_values_batch(leaves)
             ev += prob * max(values)
         return ev
 
@@ -234,10 +254,44 @@ class BeliefExpectimaxV3Agent(agent.Agent):
         assert len(self.cur) == 14
         candidates = self._unique_tiles(self.cur)
 
-        # 预选 top_k 候选：eval0 或 NN policy
+        # 预选 top_k 候选：eval0 / NN policy / baseline
         if self.candidate_policy == 'nn':
-            top = nn_policy.top_discards(self.cur, self.context, self.name,
-                                         self.max_candidates)
+            top = _get_nn_policy().top_discards(self.cur, self.context, self.name,
+                                                self.max_candidates)
+        elif self.candidate_policy == 'baseline':
+            # baseline 的 select 给出它认为最优的弃牌序列，作为 NN leaf 的候选池
+            top = algo.select(list(self.cur), False, c=self.context)[:self.max_candidates]
+        elif self.candidate_policy == 'baseline_fast':
+            # 用 eval0 替代 eval2，生成候选更快，仍保留 baseline 风格的排序
+            top = algo.select(list(self.cur), False, metric_f=algo.eval0,
+                              c=self.context)[:self.max_candidates]
+        elif self.candidate_policy == 'baseline_best':
+            # 只取 baseline（eval2）认为最好的一张，再补充 eval0 top 候选
+            # 兼顾 baseline 的稳健性与 eval0 的速度
+            baseline_best = algo.select(list(self.cur), False, c=self.context)[0]
+            eval0_top = algo.select(list(self.cur), False, metric_f=algo.eval0,
+                                    c=self.context)[:self.max_candidates - 1]
+            top = list(dict.fromkeys([baseline_best] + eval0_top))[:self.max_candidates]
+        elif self.candidate_policy == 'baseline_rerank':
+            # eval0 快速预选，再对少量候选用 eval2 重排序
+            # 速度接近 baseline_fast，质量接近 baseline
+            pre = algo.select(list(self.cur), False, metric_f=algo.eval0,
+                              c=self.context)[:self.max_candidates + 2]
+            scored = []
+            for disc in pre:
+                hand13 = list(self.cur)
+                hand13.remove(disc)
+                score = algo.eval2(hand13, self.context)
+                scored.append((score, disc))
+            scored.sort(reverse=True)
+            top = [disc for _, disc in scored[:self.max_candidates]]
+        elif self.candidate_policy == 'baseline_empty':
+            # 用 baseline 原版的空 context select，速度最快，与 baseline agent 行为一致
+            top = algo.select(list(self.cur), False)[:self.max_candidates]
+        elif self.candidate_policy == 'baseline_eval1':
+            # eval1 比 eval2 少一层递归，速度更快，仍保留 context-aware 的一阶 lookahead
+            top = algo.select(list(self.cur), False, metric_f=algo.eval1,
+                              c=self.context)[:self.max_candidates]
         else:
             scored = []
             for disc in candidates:
@@ -249,7 +303,7 @@ class BeliefExpectimaxV3Agent(agent.Agent):
             top = [disc for _, disc in scored[:self.max_candidates]]
 
         if self.leaf_evaluator == 'nn':
-            nn_leaf.set_leaf_context(self.context, self.name, list(self.cur))
+            _get_nn_leaf().set_leaf_context(self.context, self.name, list(self.cur))
 
         evaluated = []
         for disc in top:
@@ -261,7 +315,7 @@ class BeliefExpectimaxV3Agent(agent.Agent):
             evaluated.append((offense, danger, disc))
 
         if self.leaf_evaluator == 'nn':
-            nn_leaf.clear_leaf_context()
+            _get_nn_leaf().clear_leaf_context()
 
         best_offense = max(item[0] for item in evaluated)
 

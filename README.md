@@ -118,9 +118,36 @@ pypy3 scripts/tune_weights_cem.py
 | MCTSAgent | `algo/agents/mcts.py` | `algo.eval.v2` | 采样版 ExpectiMax |
 | MCTSEval2Agent | `algo/agents/mcts_eval2.py` | `algo.eval.legacy` | MCTS + eval2 叶子评估 |
 | Eval2Ctx+BD | `algo/agents/expectimax_eval2.py` | `algo.eval.legacy` + `opponent` | 实验性对手建模防守 |
+| **V3-NN** | `algo/agents/belief_expectimax_v3.py` | `algo.eval.v3` + `algo.nn` | 默认配置：`baseline_eval1` 候选 + NN leaf |
+| V3-NN-PC | `algo/agents/belief_expectimax_v3.py` | `algo.eval.v3` + `algo.nn` | NN policy 候选 + NN leaf |
+| DeterminizedMCTS | `algo/agents/determinized_mcts.py` | `algo.eval.v2` + rollout | 支持 NN/BeliefExp rollout |
+
+## NN Agent 与自对弈
+
+最近引入了基于 MLX 的 Policy-Value Net 与 Deep Value Net，以及“自对弈 + 模型筛选门”循环。
+
+训练脚本：
+
+```bash
+# Policy-Value Net（支持 hidden_dim 参数）
+python scripts/train_nn.py output/nn_training_data_merged.npz 60 256 0.001 256
+
+# Deep Value Net（支持 hidden_dims 参数，逗号分隔）
+python scripts/train_value_net_mc.py output/nn_training_data_merged.npz 60 256 0.001 512,256,128
+```
+
+自对弈 + 筛选门：
+
+```bash
+# 1000 局、6 worker、每个样本 4 次 MC rollout、100 局评估、Elo 门限 20
+python scripts/self_play_loop.py 1000 6 4 1 100 20
+```
+
+详细介绍与实验结论见 [`docs/recent-work.md`](docs/recent-work.md)。
 
 ## 实验报告索引
 
+- [`docs/recent-work.md`](docs/recent-work.md)：V3-NN-BE1 算法详解、网络训练、自对弈循环、MC rollout 标签质量分析（**最新**）。
 - [`docs/mcts-eval2-report.md`](docs/mcts-eval2-report.md)：Eval2Ctx 超越 Baseline、MCTS-Eval2 失败、B+D 对手建模、去掉 deepcopy 加速。
 - [`docs/expectimax-todos.md`](docs/expectimax-todos.md)：ExpectiMax 潜在改进清单。
 - [`docs/route-a-report.md`](docs/route-a-report.md)：路线 A 实验记录。

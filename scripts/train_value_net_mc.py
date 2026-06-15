@@ -36,6 +36,8 @@ def main():
     epochs = int(sys.argv[2]) if len(sys.argv) > 2 else 80
     batch_size = int(sys.argv[3]) if len(sys.argv) > 3 else 256
     lr = float(sys.argv[4]) if len(sys.argv) > 4 else 1e-3
+    hidden_dims_str = sys.argv[5] if len(sys.argv) > 5 else '512,256,128'
+    hidden_dims = [int(x) for x in hidden_dims_str.split(',')]
 
     print(f'Loading MC data from {data_path} ...')
     data = np.load(data_path)
@@ -50,7 +52,7 @@ def main():
 
     print(f'Train: {n_train}, Val: {n_val}, features: {X.shape[1]}')
 
-    model = MahjongValueNetDeep(input_dim=X.shape[1])
+    model = MahjongValueNetDeep(input_dim=X.shape[1], hidden_dims=hidden_dims)
     mx.eval(model.parameters())
 
     optimizer = optim.Adam(learning_rate=lr)
@@ -94,7 +96,8 @@ def main():
             best_val_loss = val_loss
             model.save_weights(os.path.join(out_dir, 'nn_value_model_mc.npz'))
             with open(os.path.join(out_dir, 'nn_value_model_mc_config.json'), 'w') as f:
-                json.dump({'input_dim': int(X.shape[1]), 'arch': 'deep'}, f)
+                json.dump({'input_dim': int(X.shape[1]), 'arch': 'deep',
+                           'hidden_dims': hidden_dims}, f)
             print('  -> saved best MC value model')
 
     print('Training complete. Best MC value model at output/nn_value_model_mc.npz')

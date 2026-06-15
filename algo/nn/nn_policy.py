@@ -5,9 +5,6 @@ import os
 import json
 import numpy as np
 
-import mlx.core as mx
-
-from algo.nn.model import MahjongNet
 from algo.nn.features import extract_features, _TILE_TO_IDX, _IDX_TO_TILE
 
 
@@ -19,6 +16,7 @@ def _load_policy_model():
     global _POLICY_MODEL, _POLICY_CONFIG
     if _POLICY_MODEL is not None:
         return _POLICY_MODEL, _POLICY_CONFIG
+    from algo.nn.model import MahjongNet
     out_dir = 'output'
     config_path = os.path.join(out_dir, 'nn_model_config.json')
     weights_path = os.path.join(out_dir, 'nn_model.npz')
@@ -35,6 +33,7 @@ def _load_policy_model():
 
 def policy_scores(hand14, context, player_name):
     """返回 34 维概率分布（按 tile index 0..33 排列，非法动作概率为 0）。"""
+    import mlx.core as mx
     model, _ = _load_policy_model()
     features = extract_features(context, hand14, player_name)
     x = mx.array(features).reshape(1, -1)

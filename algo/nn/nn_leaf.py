@@ -10,12 +10,9 @@ import os
 import json
 import numpy as np
 
-import mlx.core as mx
 import algo
 import context as ctx_module
 
-from algo.nn.model import MahjongNet
-from algo.nn.value_model import MahjongValueNet, MahjongValueNetDeep
 from algo.nn.features import extract_features, _context_features, _hand_to_array
 
 
@@ -33,6 +30,8 @@ def _load_model():
     global _MODEL, _CONFIG
     if _MODEL is not None:
         return _MODEL, _CONFIG
+    from algo.nn.model import MahjongNet
+    from algo.nn.value_model import MahjongValueNet, MahjongValueNetDeep
     out_dir = 'output'
 
     # 1) 优先使用 MC rollout 训练出的深度价值网络
@@ -42,7 +41,8 @@ def _load_model():
         with open(mc_config_path, 'r') as f:
             _CONFIG = json.load(f)
         if _CONFIG.get('arch') == 'deep':
-            _MODEL = MahjongValueNetDeep(_CONFIG['input_dim'])
+            hidden_dims = _CONFIG.get('hidden_dims')
+            _MODEL = MahjongValueNetDeep(_CONFIG['input_dim'], hidden_dims)
         else:
             _MODEL = MahjongValueNet(_CONFIG['input_dim'], _CONFIG.get('hidden_dim', 256))
         _MODEL.load_weights(mc_weights_path)
@@ -119,6 +119,7 @@ def nn_leaf_values_batch(hands):
         hand_matrix[i] = _hand_to_array(hand) / 4.0
 
     X = np.concatenate([hand_matrix, np.tile(ctx_arr, (n, 1))], axis=1)
+    import mlx.core as mx
     values = model(mx.array(X))
     values = np.array(values.tolist(), dtype=np.float32).reshape(-1)
 
