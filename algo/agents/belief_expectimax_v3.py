@@ -21,6 +21,7 @@ import algo.eval.v2 as eval_v2
 import algo.eval.v3 as eval_v3
 import algo.eval.opponent as opponent
 from algo.eval.player_belief import PlayerBelief
+from algo.nn import nn_leaf
 
 
 WIN_VALUE = 100.0
@@ -29,22 +30,24 @@ WIN_VALUE = 100.0
 _EMPTY_CONTEXT = ctx_module.Context()
 
 
-def _leaf_value_impl(hand):
-    """用原项目 eval0 作为叶子估值。"""
+def _leaf_value_impl(hand, leaf_mode='eval0'):
+    """叶子估值：eval0 或训练好的 NN value。"""
+    if leaf_mode == 'nn':
+        return nn_leaf.nn_leaf_value(hand)
     return algo.eval0(hand, _EMPTY_CONTEXT)
 
 
 @functools.lru_cache(maxsize=500000)
-def _expectimax_cached(hand_tuple, rem_tuple, depth):
+def _expectimax_cached(hand_tuple, rem_tuple, depth, leaf_mode='eval0'):
     hand = list(hand_tuple)
     remaining = {t: c for t, c in rem_tuple}
 
     if depth == 0:
-        return _leaf_value_impl(hand)
+        return _leaf_value_impl(hand, leaf_mode)
 
     total = sum(remaining.values())
     if total <= 0:
-        return _leaf_value_impl(hand)
+        return _leaf_value_impl(hand, leaf_mode)
 
     ev = 0.0
     unique_tiles = set(hand)
@@ -69,7 +72,7 @@ def _expectimax_cached(hand_tuple, rem_tuple, depth):
             hand13p.remove(x)
             rem_tuple_p = tuple(sorted(new_eff.items()))
             v = _expectimax_cached(tuple(sorted(hand13p)), rem_tuple_p,
-                                   depth - 1)
+                                   depth - 1, leaf_mode)
             if v > best:
                 best = v
         ev += prob * best
@@ -91,11 +94,13 @@ class BeliefExpectimaxV3Agent(agent.Agent):
     def __init__(self, name, verbose=False,
                  expectimax_depth=1,
                  max_candidates=8,
-                 defense_margin=0.03):
+                 defense_margin=0.03,
+                 leaf_evaluator='eval0'):
         super().__init__(name, verbose)
         self.expectimax_depth = expectimax_depth
         self.max_candidates = max_candidates
         self.defense_margin = defense_margin
+        self.leaf_evaluator = leaf_evaluator
         self.context = context_v3.ContextV3()
         self._belief = None
         self._weights_tuple = tuple(sorted(eval_v3.DEFAULT_WEIGHTS.items()))
@@ -166,7 +171,7 @@ class BeliefExpectimaxV3Agent(agent.Agent):
         """自洽 expectimax：depth 轮摸牌+打牌。"""
         hand_tuple = tuple(sorted(hand))
         rem_tuple = tuple(sorted(effective_remaining.items()))
-        return _expectimax_cached(hand_tuple, rem_tuple, depth)
+        return _expectimax_cached(hand_tuple, rem_tuple, depth, self.leaf_evaluator)
 
     def _danger_signal(self):
         if self.context.tenpai_players - {self.name}:
@@ -207,6 +212,9 @@ class BeliefExpectimaxV3Agent(agent.Agent):
         scored.sort(reverse=True)
         top = [disc for _, disc in scored[:self.max_candidates]]
 
+        if self.leaf_evaluator == 'nn':
+            nn_leaf.set_leaf_context(self.context, self.name)
+
         evaluated = []
         for disc in top:
             hand13 = list(self.cur)
@@ -215,6 +223,9 @@ class BeliefExpectimaxV3Agent(agent.Agent):
             offense = self._expectimax_value(hand13, effective, self.expectimax_depth)
             danger = self._aggregate_danger(disc)
             evaluated.append((offense, danger, disc))
+
+        if self.leaf_evaluator == 'nn':
+            nn_leaf.clear_leaf_context()
 
         best_offense = max(item[0] for item in evaluated)
 

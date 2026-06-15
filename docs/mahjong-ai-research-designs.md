@@ -525,30 +525,44 @@ Input(34 * channels) -> Conv1D/BN/ReLU -> Conv1D/BN/ReLU
 
 ### 数据与训练
 
-首次用 BeliefExp 自对弈 **200 局** 生成约 9k 个 (state, action) 样本，训练后：
-- 128 隐藏层 / 30 epoch：policy top-1 验证准确率 **~32%**；
-- 256 隐藏层 / 100 epoch：policy top-1 验证准确率 **~35%**。
+数据生成流程已优化为“每局结束后由工作进程一次性返回全部样本”，彻底摆脱原来
+`Manager.list` 细粒度 IPC 的瓶颈：
 
-### 20 局 benchmark（vs Baseline / BeliefExp / Eval2Ctx，256 hidden / 100 epoch）
+- 用 BeliefExp 自对弈 **500 局** 生成约 **23k** 个 `(state, action, outcome)` 样本；
+- Policy-Value 网络（256 hidden，约 45k 参数）训练后：
+  - policy top-1 验证准确率 **~52%**；
+  - value MSE ~0.7（验证集）。
+- 另外训练了一个**独立的价值网络** `MahjongValueNet`（256 hidden，线性输出），
+  专门用于 expectimax 叶子估值。
+
+### 把 NN 接到 BeliefExpV3 当 leaf evaluator
+
+新增模块：
+- `algo/nn/nn_leaf.py`：加载训练好的 NN 并提供 `nn_leaf_value(hand)`；
+- `algo/nn/value_model.py`：独立价值网络；
+- `scripts/train_value_net.py`：单独训练价值网络；
+- `scripts/benchmark_v3_nn_leaf.py`：对比 BeliefExp / V3-eval0 / V3-NN leaf。
+
+在 `BeliefExpectimaxV3Agent` 中通过 `leaf_evaluator='nn'` 开启 NN 叶子。当前实现
+把 NN value 作为 **eval0 的残差**（`leaf = eval0 + 2.0 * nn_value`），既保留 eval0
+的强先验，又用 NN 学习到的全局胜负信号做微调。
+
+### 100 局 benchmark（4 workers）
 
 | Agent | 胜率 | 自摸 | 铳和 | 点炮 | Elo | 平均决策时间 |
 |-------|------|------|------|------|-----|--------------|
-| Baseline | 20.0% | 0.0% | 20.0% | 30.0% | 1503 | 101.4 ms |
-| BeliefExp | 25.0% | 0.0% | 25.0% | 10.0% | 1524 | 69.2 ms |
-| Eval2Ctx | 35.0% | 0.0% | 35.0% | 10.0% | 1567 | 50.7 ms |
-| **NNAgent** | **5.0%** | 0.0% | 5.0% | 35.0% | 1406 | **0.7 ms** |
+| BeliefExp | 31.0% | 14.0% | 17.0% | 27.0% | 1504 | 83.3 ms |
+| V3-eval0 | 29.0% | 9.0% | 20.0% | 22.0% | 1474 | 42.5 ms |
+| **V3-NN leaf** | **40.0%** | 13.0% | 27.0% | 15.0% | **1522** | 412.9 ms |
 
 ### 结论
 
-- NNAgent **速度极快**（0.7 ms/步），说明 MLX/Metal 实时对局完全可行。
-- 但当前模型 **胜率还很低（5%）**，主要原因：
-  1. 训练数据仅 200 局 / 9k 样本，对 34 类分类任务严重不足；
-  2. 仅做行为克隆（behavior cloning），没有最终胜负的 value 监督；
-  3. 网络容量和特征工程都还很初级。
-- 后续方向：
-  1. 把数据量提升到 **10k–50k 局**（预计 1–3 小时生成）；
-  2. 加入 value head 的真实监督（用最终对局结果回传）；
-  3. 用 NN 作为 DetMCTS / BeliefExp 的 leaf evaluator 或 rollout policy，而不是直接当 policy。
+- 把 NN 作为 BeliefExpV3 的 leaf evaluator 后，**胜率从 29%（V3-eval0）提升到 40%，
+  点炮率从 22% 降到 15%**，说明 value net 学到了有效的全局评估信号。
+- 代价是决策时间明显增加（~413 ms/步），因为 expectimax 递归中每次叶子都要做一次
+  MLX 前向；后续可以通过批量叶子评估或减小 `max_candidates` 来提速。
+- 当前结果仍是基于 **500 局自对弈数据**的小模型，继续扩大数据量、加深网络或加入
+  更精细的 MC 价值标签，还有进一步提升空间。
 
 ---
 

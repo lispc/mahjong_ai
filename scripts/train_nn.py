@@ -76,8 +76,11 @@ def main():
     data = np.load(data_path)
     X = data['X']
     y_policy = data['y']
-    # 暂时没有 outcome label，value 目标全设 0（后续可用最终收益替换）
-    y_value = np.zeros_like(y_policy, dtype=np.float32)
+    if 'v' in data:
+        y_value = data['v'].astype(np.float32)
+    else:
+        # 兼容旧版无 outcome label 的数据
+        y_value = np.zeros_like(y_policy, dtype=np.float32)
 
     n_total = X.shape[0]
     n_val = min(5000, n_total // 10)
