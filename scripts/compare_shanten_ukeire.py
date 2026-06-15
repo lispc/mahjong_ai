@@ -20,6 +20,7 @@ from algo.agents.prob_efficiency import ProbEfficiencyAgent
 from algo.agents.belief_expectimax import BeliefExpectimaxAgent
 from algo.agents.belief_expectimax_v2 import BeliefExpectimaxV2Agent
 from algo.agents.belief_expectimax_v3 import BeliefExpectimaxV3Agent
+from algo.agents.nn_agent import NNAgent
 from algo.agents.determinized_mcts import DeterminizedMCTSAgent
 from algo.agents.shanten_ukeire import (
     ShantenUkeireAgent, ShantenUkeireV3Agent
@@ -137,6 +138,11 @@ def make_belief_exp_v3():
                                    defense_margin=0.03)
 
 
+def make_nn_agent():
+    return NNAgent('NNAgent', verbose=False, model_path='output/nn_model.npz',
+                   sample=False)
+
+
 def make_det_mcts():
     return DeterminizedMCTSAgent('DetMCTS', verbose=False,
                                  n_worlds=8, top_k=6, max_workers=1)
@@ -165,6 +171,7 @@ AGENTS = {
     'belief_exp_cautious': make_belief_exp_cautious,
     'belief_exp_v2': make_belief_exp_v2,
     'belief_exp_v3': make_belief_exp_v3,
+    'nn_agent': make_nn_agent,
     'det_mcts': make_det_mcts,
     'det_mcts_v2': make_det_mcts_v2,
     'eval2ctx': make_eval2ctx,
@@ -194,6 +201,7 @@ DISPLAY_NAMES = {
     'belief_exp_cautious': 'BeliefExpCautious',
     'belief_exp_v2': 'BeliefExpV2',
     'belief_exp_v3': 'BeliefExpV3',
+    'nn_agent': 'NNAgent',
     'det_mcts': 'DetMCTS',
     'det_mcts_v2': 'DetMCTSV2',
     'eval2ctx': 'Eval2Ctx',

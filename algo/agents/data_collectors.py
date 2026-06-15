@@ -1,0 +1,23 @@
+# -*- coding: utf-8 -*-
+"""用于生成训练数据的 Agent 包装器。"""
+
+from algo.agents.belief_expectimax import BeliefExpectimaxAgent
+from algo.nn.features import extract_features, tile_to_index
+
+
+class DataCollectorBeliefExp(BeliefExpectimaxAgent):
+    """
+    BeliefExp 的数据采集版本。
+    每次决策前记录特征向量，决策后记录所选动作。
+    """
+
+    def __init__(self, name, verbose=False, buffer=None, **kwargs):
+        super().__init__(name, verbose=verbose, **kwargs)
+        self.buffer = buffer if buffer is not None else []
+
+    def next(self):
+        assert len(self.cur) == 14
+        features = extract_features(self.context, self.cur, self.name)
+        disc = super().next()
+        self.buffer.append((features, tile_to_index(disc)))
+        return disc

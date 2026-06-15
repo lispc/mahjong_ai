@@ -506,6 +506,52 @@ Input(34 * channels) -> Conv1D/BN/ReLU -> Conv1D/BN/ReLU
 
 ---
 
+## 15. 方案 D：轻量 Policy-Value 神经网络（MLX / Metal）
+
+已实现端到端 NN 管线：
+- `algo/nn/features.py`：局面特征编码（175 维）；
+- `algo/nn/model.py`：轻量 MLP Policy-Value 网络（约 25k 参数）；
+- `algo/agents/data_collectors.py`：BeliefExp 数据采集器；
+- `scripts/generate_nn_data.py`：生成自对弈数据；
+- `scripts/train_nn.py`：MLX 训练脚本；
+- `algo/agents/nn_agent.py`：用训练好的网络在线决策。
+
+### 网络结构
+
+- 输入：175 维（手牌 + 牌山剩余 + 3 对手弃牌 + 报听标志 + 进度）。
+- 隐藏层：128 → 64（ReLU）。
+- 输出：34 维 policy logits + 1 维 value（tanh）。
+- 总参数量约 25k，单步前向 **~1.4 ms**（Apple Silicon Metal）。
+
+### 数据与训练
+
+首次用 BeliefExp 自对弈 **200 局** 生成约 9k 个 (state, action) 样本，训练 30 epoch 后：
+- policy top-1 验证准确率 **~32%**；
+- 验证 loss 从 3.3 降到 2.45。
+
+### 20 局 benchmark（vs Baseline / BeliefExp / Eval2Ctx）
+
+| Agent | 胜率 | 自摸 | 铳和 | 点炮 | Elo | 平均决策时间 |
+|-------|------|------|------|------|-----|--------------|
+| Baseline | 25.0% | 5.0% | 20.0% | 20.0% | 1556 | 102.5 ms |
+| BeliefExp | 25.0% | 5.0% | 20.0% | 15.0% | 1513 | 68.6 ms |
+| Eval2Ctx | 40.0% | 0.0% | 40.0% | 15.0% | 1600 | 52.2 ms |
+| **NNAgent** | **0.0%** | 0.0% | 0.0% | 30.0% | 1331 | **1.4 ms** |
+
+### 结论
+
+- NNAgent **速度极快**（1.4 ms/步），说明 MLX/Metal 实时对局完全可行。
+- 但当前模型 **胜率还为 0%**，主要原因：
+  1. 训练数据仅 200 局 / 9k 样本，对 34 类分类任务严重不足；
+  2. 仅做行为克隆（behavior cloning），没有最终胜负的 value 监督；
+  3. 网络容量和特征工程都还很初级。
+- 后续方向：
+  1. 把数据量提升到 **10k–50k 局**（预计 1–3 小时生成）；
+  2. 加入 value head 的真实监督（用最终对局结果回传）；
+  3. 用 NN 作为 DetMCTS / BeliefExp 的 leaf evaluator 或 rollout policy，而不是直接当 policy。
+
+---
+
 ## 参考资源
 
 - Li et al., *Suphx: Mastering Mahjong with Deep Reinforcement Learning*, 2020. https://arxiv.org/abs/2003.13590
