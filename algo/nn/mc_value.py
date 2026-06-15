@@ -5,6 +5,7 @@
 rollout policy 打完该局，最后返回当前玩家的平均收益（+1/0/-1）。
 """
 
+import os
 import random
 import copy
 
@@ -12,14 +13,22 @@ import algo
 import tile
 from utils import dict_sub, count
 import algo.eval.v2 as eval_v2
+import algo.eval.fast_eval as fast_eval
 import context as ctx_module
 
 
 _EMPTY_CONTEXT = ctx_module.Context()
 
+# 默认使用 fast eval 作为 rollout policy；可通过环境变量切换回 legacy baseline
+_USE_FAST_ROLLOUT = os.environ.get('MJ_FAST_ROLLOUT', '1') == '1'
 
-def _greedy_discard(hand14):
-    """使用 Baseline 策略做贪婪弃牌（比 eval0 更强、更贴近真实对局）。"""
+
+def _greedy_discard(hand14, evaluator=None):
+    """使用 Baseline 策略做贪婪弃牌（默认用 fast eval1，可选 legacy eval2）。"""
+    if evaluator is not None:
+        return evaluator.select(hand14)[0]
+    if _USE_FAST_ROLLOUT:
+        return fast_eval.select(hand14, _EMPTY_CONTEXT)[0]
     return algo.select(hand14, _EMPTY_CONTEXT)[0][1]
 
 
@@ -69,19 +78,23 @@ def _outcome_for(self_name, winner, win_type, dealer):
     return -1.0
 
 
-def _rollout_one(hands, wall, players, current_idx, locked, self_name):
-    """从当前玩家必须弃牌开始，跑一局快速 rollout。"""
+def _rollout_one(hands, wall, players, current_idx, locked, self_name, evaluator, max_steps=200):
+    """从当前玩家必须弃牌开始，跑一局快速 rollout。
+
+    max_steps 用于防止极端中盘局面导致 rollout 无限长；超过则按流局返回 0。
+    """
     hands = {p: list(h) for p, h in hands.items()}
     wall = list(wall)
     wall_idx = 0
     turn = current_idx
     locked = set(locked)
+    steps = 0
 
     # 当前玩家先弃牌
     if players[turn] in locked:
         discarded = hands[players[turn]][-1]
     else:
-        discarded = _greedy_discard(hands[players[turn]])
+        discarded = _greedy_discard(hands[players[turn]], evaluator=evaluator)
     hands[players[turn]].remove(discarded)
 
     # 点炮检查
@@ -94,6 +107,10 @@ def _rollout_one(hands, wall, players, current_idx, locked, self_name):
     turn = (turn + 1) % 4
 
     while wall_idx < len(wall):
+        if steps >= max_steps:
+            return 0.0
+        steps += 1
+
         drawn = wall[wall_idx]
         wall_idx += 1
         player = players[turn]
@@ -105,7 +122,7 @@ def _rollout_one(hands, wall, players, current_idx, locked, self_name):
         if player in locked:
             discarded = drawn
         else:
-            discarded = _greedy_discard(hands[player])
+            discarded = _greedy_discard(hands[player], evaluator=evaluator)
         hands[player].remove(discarded)
 
         for j, p in enumerate(players):
@@ -119,7 +136,7 @@ def _rollout_one(hands, wall, players, current_idx, locked, self_name):
     return 0.0
 
 
-def estimate_win_rate(context, hand14, self_name, n_rollouts=8):
+def estimate_win_rate(context, hand14, self_name, n_rollouts=8, max_steps=200):
     """估计当前玩家在当前局面下的期望收益（-1~+1）。"""
     if n_rollouts <= 0:
         return 0.0
@@ -127,8 +144,10 @@ def estimate_win_rate(context, hand14, self_name, n_rollouts=8):
     hands, wall, players = _sample_deal(context, hand14, self_name)
     current_idx = players.index(self_name)
     locked = set()
+    evaluator = fast_eval.FastEval1(context) if _USE_FAST_ROLLOUT else None
 
     total = 0.0
     for _ in range(n_rollouts):
-        total += _rollout_one(hands, wall, players, current_idx, locked, self_name)
+        total += _rollout_one(hands, wall, players, current_idx, locked, self_name,
+                               evaluator=evaluator, max_steps=max_steps)
     return total / n_rollouts

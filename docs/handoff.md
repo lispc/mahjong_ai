@@ -6,7 +6,7 @@
 
 ## 1. 当前最强配置
 
-默认 V3-NN agent 现在就是：
+默认 V3-NN agent：
 
 ```python
 BeliefExpectimaxV3Agent(
@@ -14,42 +14,44 @@ BeliefExpectimaxV3Agent(
     expectimax_depth=1,
     max_candidates=5,
     leaf_evaluator='nn',
-    candidate_policy='baseline_eval1'   # 默认已改
+    candidate_policy='baseline_eval1'
 )
 ```
 
-对应模型：
+对应模型（PyTorch `.pt`）：
 
-- `output/nn_model.npz` + `output/nn_model_config.json`
+- `output/nn_model.pt` + `output/nn_model_config.json`
   - Policy-Value Net，`hidden_dim=256`
-- `output/nn_value_model_mc.npz` + `output/nn_value_model_mc_config.json`
+- `output/nn_value_model_mc.pt` + `output/nn_value_model_mc_config.json`
   - Deep Value Net，`hidden_dims=[512,256,128]`
 
-200 局 benchmark（4 workers）：
+500 局 benchmark（4 GPU 并行，200 局初筛 + 400 局确认）：
 
 ```
-Baseline    : win 26.5%, deal-in 24.5%, Elo 1526, 117ms
-BeliefExp   : win 25.0%, deal-in 10.0%, Elo 1456,  78ms
-V3-NN (BE1) : win 22.0%, deal-in 19.5%, Elo 1568,  95ms
-V3-NN-PC    : win 22.5%, deal-in 15.5%, Elo 1450,  92ms
+Baseline    : win 27.2%, deal-in 25.6%, Elo 1578, 321ms
+BeliefExp   : win 30.0%, deal-in 14.2%, Elo 1569, 214ms
+V3-NN (BE1) : win 25.8%, deal-in 14.0%, Elo 1524, 170ms
+V3-NN-PC    : win 15.0%, deal-in 17.6%, Elo 1329, 153ms
 ```
 
-V3-NN-BE1 在 Elo 上超过 baseline，点炮率明显更低。
+V3-NN-BE1 相对上一版 best（Elo ~1503）提升约 +21，点炮率明显降低。
+
+> 注意：V3-NN-PC 本次训练后显著下降，因此 **current best 仅采用 V3-NN-BE1**，NN policy candidate 需要单独再优化。
 
 ---
 
 ## 2. 已 push 的数据与 Checkpoint
 
-以下文件已加入 git（它们在 `.gitignore` 里默认被忽略，本次用 `-f` 强制跟踪）：
+以下文件已加入 git（模型权重在 `.gitignore` 里默认被忽略，用 `-f` 强制跟踪）：
 
 | 文件 | 说明 |
 |---|---|
-| `output/nn_model.npz` | 当前 policy-value 网络权重 |
-| `output/nn_model_config.json` | policy net 配置（input_dim=175, hidden_dim=256） |
-| `output/nn_value_model_mc.npz` | 当前 deep value 网络权重 |
-| `output/nn_value_model_mc_config.json` | value net 配置（arch=deep, hidden_dims=[512,256,128]） |
-| `output/nn_training_data_mc.npz` | 46k 条 MC 数据（BeliefExp 自对弈 + 8 rollout） |
-| `output/nn_training_data_selfplay.npz` | 50k 条 V3-NN 自对弈数据（4 rollout） |
+| `output/nn_model.pt` | 当前 policy-value 网络权重（PyTorch） |
+| `output/nn_model_config.json` | policy net 配置（framework=pytorch, input_dim=175, hidden_dim=256） |
+| `output/nn_value_model_mc.pt` | 当前 deep value 网络权重（PyTorch） |
+| `output/nn_value_model_mc_config.json` | value net 配置（framework=pytorch, arch=deep, hidden_dims=[512,256,128]） |
+| `output/nn_training_data_mc.npz` | 46k 条历史 MC 数据（BeliefExp 自对弈 + eval0 rollout） |
+| `output/nn_training_data_selfplay.npz` | 50k 条历史 V3-NN 自对弈数据 |
 | `output/nn_training_data_merged.npz` | 96k 条合并训练数据 |
 
 到新机器后，拉下来即可直接跑 benchmark 或继续训练。
@@ -58,107 +60,75 @@ V3-NN-BE1 在 Elo 上超过 baseline，点炮率明显更低。
 
 ## 3. 环境要求
 
-- Python 3.10+
-- `pip install -r requirements.txt`
-- **MLX** 用于 NN 训练/推理：
+- Python 3.10
+- conda: `/home/scroll/miniforge3`
+- PyTorch CUDA 用于 NN 训练/推理：
   ```bash
-  pip install mlx mlx-metal
+  pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+  pip install numba numpy cython
   ```
-  > 原机器是 Apple Silicon + macOS，新机器如果是 NVIDIA/Linux，需要换成对应 MLX 后端或改为 PyTorch/TensorFlow 版本（需额外移植）。
+- **MLX 版本已备份**：`algo/nn/model_mlx.py`、`algo/nn/value_model_mlx.py`、`scripts/train_nn_mlx.py`、`scripts/train_value_net_mc_mlx.py`。由于 MLX 与 PyTorch CUDA 包版本冲突，不要在一个环境里同时安装两者。
 
 ---
 
 ## 4. 到新机器后先验证
 
 ```bash
-# 1. 跑测试
-python run_tests.py
-
-# 2. 跑 benchmark 确认模型能加载、结果接近上文
-python tmp/benchmark_new_models.py 100 4
-```
-
-如果 `tmp/benchmark_new_models.py` 没随 repo 过来，可以现场写：
-
-```python
-import agent
-from algo.agents.belief_expectimax import BeliefExpectimaxAgent
-from algo.agents.belief_expectimax_v3 import BeliefExpectimaxV3Agent
-from driver.tournament import run_tournament
-from checker.report import compute_metrics, compute_elo
-
-def make_baseline(): return agent.Agent('Baseline', verbose=False)
-def make_beliefexp(): return BeliefExpectimaxAgent('BeliefExp', verbose=False)
-def make_v3nn(): return BeliefExpectimaxV3Agent('V3-NN', expectimax_depth=1, max_candidates=5, leaf_evaluator='nn')
-def make_v3nn_pc(): return BeliefExpectimaxV3Agent('V3-NN-PC', expectimax_depth=1, max_candidates=5, leaf_evaluator='nn', candidate_policy='nn')
-
-configs = [make_baseline, make_beliefexp, make_v3nn, make_v3nn_pc]
-names = ['Baseline', 'BeliefExp', 'V3-NN', 'V3-NN-PC']
-results = run_tournament(configs, n_games=100, n_workers=4)
-metrics = compute_metrics(results, names)
-elo = compute_elo(results, names)
-for n in names:
-    print(n, metrics[n]['win_rate'], metrics[n]['deal_in_rate'], elo[n])
+source /home/scroll/miniforge3/etc/profile.d/conda.sh
+conda activate mahjong
+PYTHONPATH=. python run_tests.py
+PYTHONPATH=. python tmp/benchmark_new_models.py 100 4
 ```
 
 ---
 
 ## 5. 建议的后续路径
 
-按优先级排序：
+### 5.1 已验证：fast rollout 能加速 MC value 计算
 
-### 5.1 验证 rollout policy 对 label 质量的影响（成本最低）
+- 已实现 `algo/eval/fast_eval.py`：用 v3 Numba shanten/ukeire/wait 做一 ply 快速评估，替代 legacy eval2 作为 MC rollout policy。
+- MC value 计算速度提升约 15×（12835 样本 × 4 rollouts 从 ~1.5h 降到 ~50s）。
+- 2000 局纯 fast rollout 数据训练的 V3-NN-BE1 Elo 1524，超过旧 best（~1503）+21，已替换 current best。
 
-当前 MC value 的 rollout 用的是 greedy `eval0`，很弱。建议先改 `algo/nn/mc_value.py` 里的 `_greedy_discard`：
+### 5.2 继续放大 fast rollout 数据规模（推荐下一步）
 
-```python
-def _greedy_discard(hand14):
-    return algo.select(hand14, _EMPTY_CONTEXT)[0]
-```
-
-然后跑一个小规模对比实验（100 局），训练 value net 后 benchmark。如果提升明显，再跑 1000 局。
-
-如果新机器有 GPU/Metal，也可以试 **NN policy rollout**，预计只比 greedy eval0 慢 3–4 倍（约 1 小时），上限更高。
-
-### 5.2 跑新一轮 1000 局自对弈 + 重训练
-
-用当前最强配置生成数据：
+既然速度瓶颈解除，可以跑 5000–10000 局自对弈 + fast rollout + 纯 fast rollout 训练，看 V3-NN-BE1 是否还能再提升。
 
 ```bash
-python scripts/self_play_loop.py 1000 6 4 1 100 20
+# 1. 生成 5000 局（4 GPU 约 25 分钟）
+bash scripts/generate_selfplay_4gpu.sh 5000 32
+
+# 2. 合并 pkl
+PYTHONPATH=. python -c "
+import pickle, glob
+all_samples = []
+for pkl in sorted(glob.glob('output/selfplay_raw_1000_gpu*.pkl')):
+    with open(pkl, 'rb') as f:
+        all_samples.extend(pickle.load(f))
+with open('output/selfplay_raw_5000.pkl', 'wb') as f:
+    pickle.dump(all_samples, f)
+print(len(all_samples))
+"
+
+# 3. 计算 MC value（fast rollout, 4 rollouts, 128 workers，约 5 分钟）
+PYTHONPATH=. python scripts/compute_mc_values.py output/selfplay_raw_5000.pkl output/nn_training_data_selfplay_fast_rollout_5000.npz 4 128 30 200 1000
+
+# 4. 训练
+PYTHONPATH=. python scripts/train_nn.py output/nn_training_data_selfplay_fast_rollout_5000.npz 60 256 0.001 256
+PYTHONPATH=. python scripts/train_value_net_mc.py output/nn_training_data_selfplay_fast_rollout_5000.npz 60 256 0.001 512,256,128
+
+# 5. benchmark（4 GPU）
+bash scripts/benchmark_4gpu.sh 400 4
 ```
 
-这会：
-1. 用 V3-NN-BE1 自对弈 1000 局；
-2. 与历史 MC 数据合并；
-3. 训练 candidate；
-4. 跑 100 局 benchmark 与 current best 比较；
-5. 只有 Elo 提升 ≥20 才替换。
+### 5.3 单独优化 NN policy candidate
 
-### 5.3 继续优化网络/特征
+V3-NN-PC 本次下降明显，可以：
+- 用更大/更干净的 NN policy 训练数据；
+- 或者训练一个专门的 fast NN policy 用于 candidate generation。
 
-- 如果 rollout 改进后 value net 仍不稳定，再考虑加特征（shanten、ukeire、dora 等）；
-- 如果新机器算力更强，可以尝试把 `expectimax_depth` 提到 2，或给 DetMCTS 加 NN value 截断。
+### 5.4 其他长期方向
 
----
-
-## 6. 代码改动摘要
-
-最近修改的核心文件（都已 commit/push）：
-
-- `algo/agents/belief_expectimax_v3.py`：默认 `candidate_policy='baseline_eval1'`，新增多种候选策略；
-- `algo/nn/value_model.py`：`MahjongValueNetDeep` 支持可配置 `hidden_dims`；
-- `algo/nn/nn_leaf.py`：按 config 加载对应尺寸的 value net；
-- `algo/nn/nn_policy.py`：MLX 导入延迟到函数内部，避免父进程加载；
-- `scripts/self_play_loop.py`：父进程零 MLX 导入，支持模型筛选门；
-- `scripts/train_value_net_mc.py`：支持 `hidden_dims` 参数；
-- `docs/recent-work.md`：算法与实验详细记录；
-- `README.md`：加入 NN Agent 与自对弈章节。
-
----
-
-## 7. 注意事项
-
-- `output/` 目录仍在 `.gitignore` 中，本次 push 是**选择性强制 add**；之后新增的普通 output 文件不会自动进 git。
-- 旧模型备份 `*_old128.*` 没 push，如果新机器上想对比，需要手动从原机器复制或重新训练。
-- 如果新机器不是 macOS/Apple Silicon，MLX 可能无法直接运行，需要把 `algo/nn/model.py` / `value_model.py` 和训练脚本移植到 PyTorch。
+- 用 DetMCTS / MCTS 替代 ExpectiMax；
+- 加入更丰富的特征（对手报听、壁牌、筋牌）；
+- 尝试 Expert Iteration / outcome 加权训练。

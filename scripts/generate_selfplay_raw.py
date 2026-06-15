@@ -14,6 +14,20 @@ from algo.agents.data_collectors import DataCollectorV3NN
 from driver import engine
 
 
+def _outcome_for_agent(agent_name, result):
+    win_type = result.get('win_type')
+    if win_type == 'draw':
+        return 0.0
+    winner = result.get('winner')
+    if agent_name == winner:
+        return 1.0
+    if win_type == 'ron' and result.get('dealer') == agent_name:
+        return -1.0
+    if win_type == 'self':
+        return -1.0
+    return 0.0
+
+
 def _play_and_collect_raw(args):
     seed, target_seat = args
     random.seed(seed)
@@ -35,9 +49,10 @@ def _play_and_collect_raw(args):
 
     if target_agent is None:
         return []
-    # 只保留计算 MC value 所需的最小信息
+    outcome = _outcome_for_agent(target_name, result)
+    # 只保留计算 MC value 所需的最小信息，以及最终胜负用于 timeout fallback
     return [(item['context'], item['hand'], item['name'],
-             item['features'], item['action']) for item in target_agent.buffer]
+             item['features'], item['action'], outcome) for item in target_agent.buffer]
 
 
 def main():

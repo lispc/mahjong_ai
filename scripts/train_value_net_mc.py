@@ -49,6 +49,17 @@ def main():
     X = data['X']
     y_value = data['v'].astype(np.float32)
 
+    # 如果数据带 quality flag，过滤掉 timeout/exception/truncated 样本
+    if 'q' in data:
+        q = data['q']
+        mask = q == 0
+        n_total = len(q)
+        n_bad = n_total - int(mask.sum())
+        if n_bad > 0:
+            print(f'Filtering {n_bad}/{n_total} bad samples (timeout/exception/truncated)')
+            X = X[mask]
+            y_value = y_value[mask]
+
     n_total = X.shape[0]
     n_val = min(5000, n_total // 10)
     n_train = n_total - n_val
