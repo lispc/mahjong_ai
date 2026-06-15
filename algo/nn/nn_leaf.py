@@ -16,7 +16,7 @@ import context as ctx_module
 
 from algo.nn.model import MahjongNet
 from algo.nn.value_model import MahjongValueNet
-from algo.nn.features import extract_features
+from algo.nn.features import extract_features, _context_features, _hand_to_array
 
 
 _EMPTY_CONTEXT = ctx_module.Context()
@@ -26,6 +26,7 @@ _MODEL = None
 _CONFIG = None
 _CURRENT_CONTEXT = None
 _CURRENT_PLAYER = None
+_CURRENT_HAND14 = None
 
 
 def _load_model():
@@ -58,17 +59,19 @@ def _load_model():
     return _MODEL, _CONFIG
 
 
-def set_leaf_context(context, player_name):
+def set_leaf_context(context, player_name, current_hand14=None):
     """在 expectimax 搜索前设置当前决策局面。"""
-    global _CURRENT_CONTEXT, _CURRENT_PLAYER
+    global _CURRENT_CONTEXT, _CURRENT_PLAYER, _CURRENT_HAND14
     _CURRENT_CONTEXT = context
     _CURRENT_PLAYER = player_name
+    _CURRENT_HAND14 = current_hand14
 
 
 def clear_leaf_context():
-    global _CURRENT_CONTEXT, _CURRENT_PLAYER
+    global _CURRENT_CONTEXT, _CURRENT_PLAYER, _CURRENT_HAND14
     _CURRENT_CONTEXT = None
     _CURRENT_PLAYER = None
+    _CURRENT_HAND14 = None
 
 
 def nn_leaf_value(hand):
@@ -77,14 +80,36 @@ def nn_leaf_value(hand):
     独立价值网络输出的是未约束的标量；这里把它与原项目 eval0 相加作为残差，保留
     eval0 的强先验，同时让 NN 学习微调。
     """
+    return nn_leaf_values_batch([hand])[0]
+
+
+def nn_leaf_values_batch(hands):
+    """批量评估多个手牌，返回 list[float]。
+
+    把同一局面下的所有叶子手牌拼成一个大 batch 一次性前向，避免多次 MLX 小 batch
+    调度的开销。
+    """
+    if not hands:
+        return []
     model, _ = _load_model()
     ctx = _CURRENT_CONTEXT
     player = _CURRENT_PLAYER
     if ctx is None or player is None:
-        raise RuntimeError('nn_leaf_value called before set_leaf_context')
-    features = extract_features(ctx, hand, player)
-    x = mx.array(features).reshape(1, -1)
-    value = model(x)
-    # eval0 基线 + NN 残差（独立 value net 输出量级约 -1~+1，这里用小权重，
-    # 避免不精确 value 把 eval0 的强先验淹没）
-    return algo.eval0(hand, _EMPTY_CONTEXT) + float(value.item()) * 2.0
+        raise RuntimeError('nn_leaf_values_batch called before set_leaf_context')
+
+    # 上下文特征只算一次；叶子之间的差异只有手牌 34 维
+    ctx_arr = _context_features(ctx, _CURRENT_HAND14, player)
+
+    n = len(hands)
+    hand_matrix = np.zeros((n, 34), dtype=np.float32)
+    for i, hand in enumerate(hands):
+        hand_matrix[i] = _hand_to_array(hand) / 4.0
+
+    X = np.concatenate([hand_matrix, np.tile(ctx_arr, (n, 1))], axis=1)
+    values = model(mx.array(X))
+    values = np.array(values.tolist(), dtype=np.float32).reshape(-1)
+
+    base_values = []
+    for hand in hands:
+        base_values.append(algo.eval0(hand, _EMPTY_CONTEXT) + float(values[len(base_values)]) * 2.0)
+    return base_values

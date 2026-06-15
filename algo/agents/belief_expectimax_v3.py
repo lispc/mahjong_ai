@@ -169,9 +169,39 @@ class BeliefExpectimaxV3Agent(agent.Agent):
 
     def _expectimax_value(self, hand, effective_remaining, depth):
         """自洽 expectimax：depth 轮摸牌+打牌。"""
+        if self.leaf_evaluator == 'nn' and depth == 1:
+            return self._expectimax_value_batched_nn(hand, effective_remaining)
         hand_tuple = tuple(sorted(hand))
         rem_tuple = tuple(sorted(effective_remaining.items()))
         return _expectimax_cached(hand_tuple, rem_tuple, depth, self.leaf_evaluator)
+
+    def _expectimax_value_batched_nn(self, hand13, effective_remaining):
+        """对 depth=1 的 NN 叶子做批量评估，减少 MLX 前向调度次数。"""
+        hand13 = list(hand13)
+        unique_disc = self._unique_tiles(hand13)
+        total = sum(effective_remaining.values())
+        if total <= 0:
+            return nn_leaf.nn_leaf_value(hand13)
+
+        ev = 0.0
+        for t, cnt in effective_remaining.items():
+            if cnt <= 0:
+                continue
+            prob = cnt / total
+            hand14 = hand13 + [t]
+            if eval_v3._is_win_14(eval_v3.hand_to_counts(hand14)):
+                ev += prob * WIN_VALUE
+                continue
+
+            leaves = []
+            for x in set(unique_disc) | {t}:
+                if x not in hand14:
+                    continue
+                leaves.append(tuple(sorted([v for v in hand14 if v != x])))
+
+            values = nn_leaf.nn_leaf_values_batch(leaves)
+            ev += prob * max(values)
+        return ev
 
     def _danger_signal(self):
         if self.context.tenpai_players - {self.name}:
@@ -213,7 +243,7 @@ class BeliefExpectimaxV3Agent(agent.Agent):
         top = [disc for _, disc in scored[:self.max_candidates]]
 
         if self.leaf_evaluator == 'nn':
-            nn_leaf.set_leaf_context(self.context, self.name)
+            nn_leaf.set_leaf_context(self.context, self.name, list(self.cur))
 
         evaluated = []
         for disc in top:
