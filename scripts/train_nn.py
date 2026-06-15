@@ -4,6 +4,7 @@
 import sys
 import os
 import time
+import json
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -87,7 +88,8 @@ def main():
 
     print(f'Train: {n_train}, Val: {n_val}, features: {X.shape[1]}')
 
-    model = MahjongNet(input_dim=X.shape[1], hidden_dim=128)
+    hidden_dim = int(sys.argv[5]) if len(sys.argv) > 5 else 128
+    model = MahjongNet(input_dim=X.shape[1], hidden_dim=hidden_dim)
     mx.eval(model.parameters())
 
     optimizer = optim.Adam(learning_rate=lr)
@@ -136,6 +138,8 @@ def main():
         if val_metrics['loss'] < best_val_loss:
             best_val_loss = val_metrics['loss']
             model.save_weights(os.path.join(out_dir, 'nn_model.npz'))
+            with open(os.path.join(out_dir, 'nn_model_config.json'), 'w') as f:
+                json.dump({'input_dim': int(X.shape[1]), 'hidden_dim': hidden_dim}, f)
             print('  -> saved best model')
 
     print('Training complete. Best model at output/nn_model.npz')

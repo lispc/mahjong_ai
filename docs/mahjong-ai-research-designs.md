@@ -525,23 +525,23 @@ Input(34 * channels) -> Conv1D/BN/ReLU -> Conv1D/BN/ReLU
 
 ### 数据与训练
 
-首次用 BeliefExp 自对弈 **200 局** 生成约 9k 个 (state, action) 样本，训练 30 epoch 后：
-- policy top-1 验证准确率 **~32%**；
-- 验证 loss 从 3.3 降到 2.45。
+首次用 BeliefExp 自对弈 **200 局** 生成约 9k 个 (state, action) 样本，训练后：
+- 128 隐藏层 / 30 epoch：policy top-1 验证准确率 **~32%**；
+- 256 隐藏层 / 100 epoch：policy top-1 验证准确率 **~35%**。
 
-### 20 局 benchmark（vs Baseline / BeliefExp / Eval2Ctx）
+### 20 局 benchmark（vs Baseline / BeliefExp / Eval2Ctx，256 hidden / 100 epoch）
 
 | Agent | 胜率 | 自摸 | 铳和 | 点炮 | Elo | 平均决策时间 |
 |-------|------|------|------|------|-----|--------------|
-| Baseline | 25.0% | 5.0% | 20.0% | 20.0% | 1556 | 102.5 ms |
-| BeliefExp | 25.0% | 5.0% | 20.0% | 15.0% | 1513 | 68.6 ms |
-| Eval2Ctx | 40.0% | 0.0% | 40.0% | 15.0% | 1600 | 52.2 ms |
-| **NNAgent** | **0.0%** | 0.0% | 0.0% | 30.0% | 1331 | **1.4 ms** |
+| Baseline | 20.0% | 0.0% | 20.0% | 30.0% | 1503 | 101.4 ms |
+| BeliefExp | 25.0% | 0.0% | 25.0% | 10.0% | 1524 | 69.2 ms |
+| Eval2Ctx | 35.0% | 0.0% | 35.0% | 10.0% | 1567 | 50.7 ms |
+| **NNAgent** | **5.0%** | 0.0% | 5.0% | 35.0% | 1406 | **0.7 ms** |
 
 ### 结论
 
-- NNAgent **速度极快**（1.4 ms/步），说明 MLX/Metal 实时对局完全可行。
-- 但当前模型 **胜率还为 0%**，主要原因：
+- NNAgent **速度极快**（0.7 ms/步），说明 MLX/Metal 实时对局完全可行。
+- 但当前模型 **胜率还很低（5%）**，主要原因：
   1. 训练数据仅 200 局 / 9k 样本，对 34 类分类任务严重不足；
   2. 仅做行为克隆（behavior cloning），没有最终胜负的 value 监督；
   3. 网络容量和特征工程都还很初级。

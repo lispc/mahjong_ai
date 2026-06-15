@@ -2,6 +2,7 @@
 """用训练好的 Policy-Value 网络做决策的 Agent。"""
 
 import os
+import json
 
 import numpy as np
 import agent
@@ -36,7 +37,14 @@ class NNAgent(agent.Agent):
     def _load_model(self):
         if not os.path.exists(self.model_path):
             raise FileNotFoundError(f'Model not found: {self.model_path}')
-        self.model = MahjongNet(input_dim=175, hidden_dim=128)
+        config_path = self.model_path.replace('.npz', '_config.json')
+        if os.path.exists(config_path):
+            with open(config_path) as f:
+                config = json.load(f)
+            hidden_dim = config.get('hidden_dim', 128)
+        else:
+            hidden_dim = 128
+        self.model = MahjongNet(input_dim=175, hidden_dim=hidden_dim)
         self.model.load_weights(self.model_path)
         mx.eval(self.model.parameters())
 
