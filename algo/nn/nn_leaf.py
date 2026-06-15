@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""把训练好的 NN 作为叶子估值器供 expectimax / MCTS 使用。
+"""把训练好的 NN 作为叶子估值器供 expectimax / MCTS 使用（PyTorch）。
 
 为了避免在递归过程中把不可哈希的 context 传入 lru_cache，这里采用“调用前设置当前
 context”的方式：每次 agent 做决策前把当前局面写进线程无关的全局变量，递归叶子估值时
@@ -30,13 +30,15 @@ def _load_model():
     global _MODEL, _CONFIG
     if _MODEL is not None:
         return _MODEL, _CONFIG
+
+    import torch
     from algo.nn.model import MahjongNet
     from algo.nn.value_model import MahjongValueNet, MahjongValueNetDeep
     out_dir = 'output'
 
     # 1) 优先使用 MC rollout 训练出的深度价值网络
     mc_config_path = os.path.join(out_dir, 'nn_value_model_mc_config.json')
-    mc_weights_path = os.path.join(out_dir, 'nn_value_model_mc.npz')
+    mc_weights_path = os.path.join(out_dir, 'nn_value_model_mc.pt')
     if os.path.exists(mc_config_path) and os.path.exists(mc_weights_path):
         with open(mc_config_path, 'r') as f:
             _CONFIG = json.load(f)
@@ -45,22 +47,28 @@ def _load_model():
             _MODEL = MahjongValueNetDeep(_CONFIG['input_dim'], hidden_dims)
         else:
             _MODEL = MahjongValueNet(_CONFIG['input_dim'], _CONFIG.get('hidden_dim', 256))
-        _MODEL.load_weights(mc_weights_path)
+        _MODEL.load_state_dict(torch.load(mc_weights_path, map_location='cpu'))
+        _MODEL.eval()
+        if torch.cuda.is_available():
+            _MODEL = _MODEL.cuda()
         return _MODEL, _CONFIG
 
     # 2) 其次使用独立训练的价值网络
     value_config_path = os.path.join(out_dir, 'nn_value_model_config.json')
-    value_weights_path = os.path.join(out_dir, 'nn_value_model.npz')
+    value_weights_path = os.path.join(out_dir, 'nn_value_model.pt')
     if os.path.exists(value_config_path) and os.path.exists(value_weights_path):
         with open(value_config_path, 'r') as f:
             _CONFIG = json.load(f)
         _MODEL = MahjongValueNet(_CONFIG['input_dim'], _CONFIG['hidden_dim'])
-        _MODEL.load_weights(value_weights_path)
+        _MODEL.load_state_dict(torch.load(value_weights_path, map_location='cpu'))
+        _MODEL.eval()
+        if torch.cuda.is_available():
+            _MODEL = _MODEL.cuda()
         return _MODEL, _CONFIG
 
     # 3) 回退到 policy-value 网络的 value head
     config_path = os.path.join(out_dir, 'nn_model_config.json')
-    weights_path = os.path.join(out_dir, 'nn_model.npz')
+    weights_path = os.path.join(out_dir, 'nn_model.pt')
     if not os.path.exists(config_path) or not os.path.exists(weights_path):
         raise FileNotFoundError(
             f'NN model not found: {config_path} or {weights_path}. '
@@ -68,7 +76,10 @@ def _load_model():
     with open(config_path, 'r') as f:
         _CONFIG = json.load(f)
     _MODEL = MahjongNet(_CONFIG['input_dim'], _CONFIG['hidden_dim'])
-    _MODEL.load_weights(weights_path)
+    _MODEL.load_state_dict(torch.load(weights_path, map_location='cpu'))
+    _MODEL.eval()
+    if torch.cuda.is_available():
+        _MODEL = _MODEL.cuda()
     return _MODEL, _CONFIG
 
 
@@ -88,20 +99,18 @@ def clear_leaf_context():
 
 
 def nn_leaf_value(hand):
-    """返回当前手牌在当前已设 context 下的 NN 价值估计（标量 float）。
-
-    独立价值网络输出的是未约束的标量；这里把它与原项目 eval0 相加作为残差，保留
-    eval0 的强先验，同时让 NN 学习微调。
-    """
+    """返回当前手牌在当前已设 context 下的 NN 价值估计（标量 float）。"""
     return nn_leaf_values_batch([hand])[0]
 
 
 def nn_leaf_values_batch(hands):
     """批量评估多个手牌，返回 list[float]。
 
-    把同一局面下的所有叶子手牌拼成一个大 batch 一次性前向，避免多次 MLX 小 batch
+    把同一局面下的所有叶子手牌拼成一个大 batch 一次性前向，避免多次小 batch
     调度的开销。
     """
+    import torch
+
     if not hands:
         return []
     model, _ = _load_model()
@@ -119,9 +128,12 @@ def nn_leaf_values_batch(hands):
         hand_matrix[i] = _hand_to_array(hand) / 4.0
 
     X = np.concatenate([hand_matrix, np.tile(ctx_arr, (n, 1))], axis=1)
-    import mlx.core as mx
-    values = model(mx.array(X))
-    values = np.array(values.tolist(), dtype=np.float32).reshape(-1)
+    X_t = torch.tensor(X, dtype=torch.float32)
+    if torch.cuda.is_available():
+        X_t = X_t.cuda()
+
+    with torch.no_grad():
+        values = model(X_t).cpu().numpy().reshape(-1)
 
     base_values = []
     for hand in hands:

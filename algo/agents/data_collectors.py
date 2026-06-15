@@ -19,13 +19,16 @@ class DataCollectorBeliefExp(BeliefExpectimaxAgent):
     def next(self):
         assert len(self.cur) == 14
         features = extract_features(self.context, self.cur, self.name)
+        hand14 = list(self.cur)
+        ctx_snapshot = self.context.copy()
         disc = super().next()
         # 保存完整 snapshot，方便后续计算 MC rollout value label
+        # 注意：必须保存弃牌前的 14 张手牌和决策前的 context
         self.buffer.append({
             'features': features,
             'action': tile_to_index(disc),
-            'context': self.context.copy(),
-            'hand': list(self.cur),
+            'context': ctx_snapshot,
+            'hand': hand14,
             'name': self.name,
         })
         return disc
@@ -45,12 +48,15 @@ class DataCollectorV3NN(BeliefExpectimaxV3Agent):
     def next(self):
         assert len(self.cur) == 14
         features = extract_features(self.context, self.cur, self.name)
+        hand14 = list(self.cur)
+        ctx_snapshot = self.context.copy()
         disc = super().next()
+        # 注意：必须保存弃牌前的 14 张手牌和决策前的 context
         self.buffer.append({
             'features': features,
             'action': tile_to_index(disc),
-            'context': self.context.copy(),
-            'hand': list(self.cur),
+            'context': ctx_snapshot,
+            'hand': hand14,
             'name': self.name,
         })
         return disc

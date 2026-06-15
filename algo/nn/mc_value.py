@@ -19,21 +19,8 @@ _EMPTY_CONTEXT = ctx_module.Context()
 
 
 def _greedy_discard(hand14):
-    """最大化 eval0(hand13) 的贪婪弃牌（不考虑上下文，只做牌效）。"""
-    best_disc = None
-    best_score = -float('inf')
-    seen = set()
-    for disc in hand14:
-        if disc in seen:
-            continue
-        seen.add(disc)
-        hand13 = list(hand14)
-        hand13.remove(disc)
-        score = algo.eval0(hand13, _EMPTY_CONTEXT)
-        if score > best_score:
-            best_score = score
-            best_disc = disc
-    return best_disc
+    """使用 Baseline 策略做贪婪弃牌（比 eval0 更强、更贴近真实对局）。"""
+    return algo.select(hand14, _EMPTY_CONTEXT)[0][1]
 
 
 def _sample_deal(context, self_hand, self_name):

@@ -33,9 +33,9 @@ import random
 
 _MODEL_FILES = [
     ('nn_model_config.json', 'nn_model_config'),
-    ('nn_model.npz', 'nn_model'),
+    ('nn_model.pt', 'nn_model'),
     ('nn_value_model_mc_config.json', 'nn_value_model_mc_config'),
-    ('nn_value_model_mc.npz', 'nn_value_model_mc'),
+    ('nn_value_model_mc.pt', 'nn_value_model_mc'),
 ]
 
 

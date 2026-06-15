@@ -177,7 +177,7 @@ return argmax_d utility(d, hand14, context, self.name)
 
 ## 实验更新
 
-方案 A 和方案 3（复用 v3 CEM 权重 + 防守）已实现并测试，详细结果见 [`docs/shanten-ukeire-experiment.md`](shanten-ukeire-experiment.md)。关键结论：
+方案 A 和方案 3（复用 v3 CEM 权重 + 防守）已实现并测试，详细结果见 [`../reports/shanten-ukeire-experiment.md`](../reports/shanten-ukeire-experiment.md)。关键结论：
 
 - **方案 3 的防守项非常有效**：`ShantenUkeireV3Agent` 在 `defense_weight=2.0` 时，1.4–2.0 ms/决策，胜率与 Eval2Ctx 同级，点炮率更低。
 - **直接套用 expectimax（方案 B 的思想）收益不明显**：depth=1 全枚举反而变弱；depth=1 + top-k 限制有潜力但耗时 583 ms；depth=2 更慢更不稳定。

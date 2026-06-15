@@ -1,1 +1,1 @@
-{"input_dim": 175, "arch": "deep"}
+{"input_dim": 175, "arch": "deep", "hidden_dims": [512, 256, 128], "framework": "pytorch"}

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""用训练好的 Policy-Value 网络的 policy head 给候选弃牌打分。"""
+"""用训练好的 Policy-Value 网络的 policy head 给候选弃牌打分（PyTorch）。"""
 
 import os
 import json
@@ -16,10 +16,12 @@ def _load_policy_model():
     global _POLICY_MODEL, _POLICY_CONFIG
     if _POLICY_MODEL is not None:
         return _POLICY_MODEL, _POLICY_CONFIG
+
+    import torch
     from algo.nn.model import MahjongNet
     out_dir = 'output'
     config_path = os.path.join(out_dir, 'nn_model_config.json')
-    weights_path = os.path.join(out_dir, 'nn_model.npz')
+    weights_path = os.path.join(out_dir, 'nn_model.pt')
     if not os.path.exists(config_path) or not os.path.exists(weights_path):
         raise FileNotFoundError(
             f'Policy model not found: {config_path} or {weights_path}. '
@@ -27,27 +29,37 @@ def _load_policy_model():
     with open(config_path, 'r') as f:
         _POLICY_CONFIG = json.load(f)
     _POLICY_MODEL = MahjongNet(_POLICY_CONFIG['input_dim'], _POLICY_CONFIG['hidden_dim'])
-    _POLICY_MODEL.load_weights(weights_path)
+    _POLICY_MODEL.load_state_dict(torch.load(weights_path, map_location='cpu'))
+    _POLICY_MODEL.eval()
+    if torch.cuda.is_available():
+        _POLICY_MODEL = _POLICY_MODEL.cuda()
     return _POLICY_MODEL, _POLICY_CONFIG
 
 
 def policy_scores(hand14, context, player_name):
     """返回 34 维概率分布（按 tile index 0..33 排列，非法动作概率为 0）。"""
-    import mlx.core as mx
+    import torch
+
     model, _ = _load_policy_model()
     features = extract_features(context, hand14, player_name)
-    x = mx.array(features).reshape(1, -1)
-    logits, _ = model(x)
+    x = torch.tensor(features, dtype=torch.float32).reshape(1, -1)
+    if torch.cuda.is_available():
+        x = x.cuda()
+
+    with torch.no_grad():
+        logits, _ = model(x)
+        logits = logits.cpu().numpy().reshape(-1)
 
     legal_indices = list({int(_TILE_TO_IDX[t]) for t in hand14})
     mask = np.zeros(34, dtype=np.float32)
     mask[legal_indices] = 1.0
-    mask_mx = mx.array(mask)
+
     # 屏蔽非法动作
-    logits = logits * mask_mx + (mask_mx - 1.0) * 1e9
-    logits = logits - mx.max(logits, axis=-1, keepdims=True)
-    probs = mx.exp(logits) / mx.sum(mx.exp(logits), axis=-1, keepdims=True)
-    return np.array(probs.reshape(-1).tolist(), dtype=np.float32)
+    logits = logits * mask + (mask - 1.0) * 1e9
+    logits = logits - np.max(logits)
+    exp = np.exp(logits)
+    probs = exp / np.sum(exp)
+    return probs.astype(np.float32)
 
 
 def top_discards(hand14, context, player_name, k=5):

@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""轻量 Policy-Value 网络（PyTorch）。"""
+"""轻量 Policy-Value 网络（MLX）。"""
 
-import torch
-import torch.nn as nn
+import mlx.core as mx
+import mlx.nn as nn
 
 
 class MahjongNet(nn.Module):
@@ -19,11 +19,11 @@ class MahjongNet(nn.Module):
         self.policy_head = nn.Linear(hidden_dim // 2, 34)
         self.value_head = nn.Linear(hidden_dim // 2, 1)
 
-    def forward(self, x):
-        h = torch.relu(self.fc1(x))
-        h = torch.relu(self.fc2(h))
+    def __call__(self, x):
+        h = mx.maximum(self.fc1(x), 0)  # ReLU
+        h = mx.maximum(self.fc2(h), 0)
         policy_logits = self.policy_head(h)
-        value = torch.tanh(self.value_head(h))
+        value = mx.tanh(self.value_head(h))
         return policy_logits, value
 
 
@@ -32,13 +32,14 @@ def loss_fn(model, X, y_policy, y_value, policy_weight=1.0, value_weight=0.5):
     logits, value = model(X)
 
     # policy loss: sparse cross entropy
-    policy_loss = nn.functional.cross_entropy(logits, y_policy)
+    log_probs = mx.log_softmax(logits, axis=-1)
+    policy_loss = -mx.mean(mx.take_along_axis(
+        log_probs, mx.expand_dims(y_policy, -1), axis=-1))
 
     # value loss: MSE
-    value = value.squeeze(-1)
-    value_loss = nn.functional.mse_loss(value, y_value)
+    value_loss = mx.mean((value.squeeze(-1) - y_value) ** 2)
 
     return policy_weight * policy_loss + value_weight * value_loss, {
-        'policy_loss': policy_loss.detach(),
-        'value_loss': value_loss.detach(),
+        'policy_loss': policy_loss,
+        'value_loss': value_loss,
     }

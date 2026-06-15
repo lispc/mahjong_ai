@@ -143,15 +143,15 @@ python scripts/train_value_net_mc.py output/nn_training_data_merged.npz 60 256 0
 python scripts/self_play_loop.py 1000 6 4 1 100 20
 ```
 
-详细介绍与实验结论见 [`docs/recent-work.md`](docs/recent-work.md)。
+详细介绍与实验结论见 [`docs/reports/recent-work.md`](docs/reports/recent-work.md)。
 
 ## 实验报告索引
 
-- [`docs/recent-work.md`](docs/recent-work.md)：V3-NN-BE1 算法详解、网络训练、自对弈循环、MC rollout 标签质量分析（**最新**）。
-- [`docs/mcts-eval2-report.md`](docs/mcts-eval2-report.md)：Eval2Ctx 超越 Baseline、MCTS-Eval2 失败、B+D 对手建模、去掉 deepcopy 加速。
+- [`docs/reports/recent-work.md`](docs/reports/recent-work.md)：V3-NN-BE1 算法详解、网络训练、自对弈循环、MC rollout 标签质量分析（**最新**）。
+- [`docs/reports/mcts-eval2-report.md`](docs/reports/mcts-eval2-report.md)：Eval2Ctx 超越 Baseline、MCTS-Eval2 失败、B+D 对手建模、去掉 deepcopy 加速。
 - [`docs/expectimax-todos.md`](docs/expectimax-todos.md)：ExpectiMax 潜在改进清单。
-- [`docs/route-a-report.md`](docs/route-a-report.md)：路线 A 实验记录。
-- [`docs/eval-improvement-plan.md`](docs/eval-improvement-plan.md)：评估函数改进计划。
+- [`docs/reports/route-a-report.md`](docs/reports/route-a-report.md)：路线 A 实验记录。
+- [`docs/designs/eval-improvement-plan.md`](docs/designs/eval-improvement-plan.md)：评估函数改进计划。
 
 ## 注意事项
 

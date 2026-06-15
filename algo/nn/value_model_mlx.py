@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""独立的价值网络（只输出一个标量价值）（PyTorch）。"""
+"""独立的价值网络（只输出一个标量价值）。"""
 
-import torch
-import torch.nn as nn
+import mlx.core as mx
+import mlx.nn as nn
 
 
 class MahjongValueNet(nn.Module):
@@ -14,9 +14,8 @@ class MahjongValueNet(nn.Module):
         self.fc2 = nn.Linear(hidden_dim, hidden_dim // 2)
         self.value_head = nn.Linear(hidden_dim // 2, 1)
 
-    def forward(self, x):
-        h = torch.relu(self.fc1(x))
-        h = torch.relu(self.fc2(h))
+    def __call__(self, x):
+        h = mx.maximum(self.fc2(mx.maximum(self.fc1(x), 0)), 0)
         return self.value_head(h).squeeze(-1)
 
 
@@ -31,22 +30,14 @@ class MahjongValueNetDeep(nn.Module):
         if hidden_dims is None:
             hidden_dims = [512, 256, 128]
         dims = [input_dim] + list(hidden_dims)
-        layers = []
-        for i in range(len(dims) - 1):
-            layers.append(nn.Linear(dims[i], dims[i + 1]))
-            layers.append(nn.ReLU())
-        self.net = nn.Sequential(*layers)
+        # 层名从 fc1 开始，保证默认 [512,256,128] 架构与旧权重兼容
+        for i in range(1, len(dims)):
+            setattr(self, f'fc{i}', nn.Linear(dims[i - 1], dims[i]))
         self.value_head = nn.Linear(dims[-1], 1)
+        self._n_layers = len(dims) - 1
 
-    def forward(self, x):
-        return self.value_head(self.net(x)).squeeze(-1)
-
-
-def save_model(model, path):
-    """保存 PyTorch 模型权重。"""
-    torch.save(model.state_dict(), path)
-
-
-def load_model(model, path):
-    """加载 PyTorch 模型权重。"""
-    model.load_state_dict(torch.load(path, map_location='cpu'))
+    def __call__(self, x):
+        h = x
+        for i in range(1, self._n_layers + 1):
+            h = mx.maximum(getattr(self, f'fc{i}')(h), 0)
+        return self.value_head(h).squeeze(-1)

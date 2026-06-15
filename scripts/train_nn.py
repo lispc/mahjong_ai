@@ -1,5 +1,6 @@
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""训练轻量 Policy-Value 网络（MLX）。"""
+"""训练轻量 Policy-Value 网络（PyTorch）。"""
 
 import sys
 import os
@@ -9,54 +10,41 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import mlx.core as mx
-import mlx.nn as nn
-import mlx.optimizers as optim
+import torch
+import torch.nn as nn
 
 from algo.nn.model import MahjongNet
 
 
-def batch_iterator(X, y_policy, y_value, batch_size, shuffle=True):
-    n = X.shape[0]
-    idx = np.arange(n)
-    if shuffle:
-        np.random.shuffle(idx)
-    for start in range(0, n, batch_size):
-        end = min(start + batch_size, n)
-        b = idx[start:end]
-        yield (mx.array(X[b]),
-               mx.array(y_policy[b]),
-               mx.array(y_value[b]))
-
-
-def evaluate(model, X, y_policy, y_value, batch_size=1024):
+def evaluate(model, X_val, yp_val, yv_val, batch_size=1024, device='cuda'):
+    model.eval()
     total_loss = 0.0
     total_policy_loss = 0.0
     total_value_loss = 0.0
     correct = 0
     total = 0
-    n = X.shape[0]
+    n = X_val.shape[0]
+    criterion = nn.CrossEntropyLoss(reduction='sum')
+    mse = nn.MSELoss(reduction='sum')
 
-    for start in range(0, n, batch_size):
-        end = min(start + batch_size, n)
-        Xb = mx.array(X[start:end])
-        yp_b = mx.array(y_policy[start:end])
-        yv_b = mx.array(y_value[start:end])
+    with torch.no_grad():
+        for start in range(0, n, batch_size):
+            end = min(start + batch_size, n)
+            Xb = X_val[start:end]
+            yp_b = yp_val[start:end]
+            yv_b = yv_val[start:end]
 
-        logits, value = model(Xb)
-        log_probs = logits - mx.max(logits, axis=-1, keepdims=True)
-        log_probs = log_probs - mx.log(mx.sum(mx.exp(log_probs), axis=-1, keepdims=True))
-        policy_loss = -mx.mean(mx.take_along_axis(
-            log_probs, mx.expand_dims(yp_b, -1), axis=-1))
-        value_loss = mx.mean((value.squeeze(-1) - yv_b) ** 2)
-        loss = policy_loss + 0.5 * value_loss
+            logits, value = model(Xb)
+            policy_loss = criterion(logits, yp_b)
+            value_loss = mse(value.squeeze(-1), yv_b)
+            loss = policy_loss + 0.5 * value_loss
 
-        total_loss += float(loss) * (end - start)
-        total_policy_loss += float(policy_loss) * (end - start)
-        total_value_loss += float(value_loss) * (end - start)
-        preds = mx.argmax(logits, axis=-1)
-        correct += int(mx.sum(preds == yp_b))
-        total += end - start
+            total_loss += float(loss)
+            total_policy_loss += float(policy_loss)
+            total_value_loss += float(value_loss)
+            preds = torch.argmax(logits, dim=-1)
+            correct += int((preds == yp_b).sum())
+            total += end - start
 
     return {
         'loss': total_loss / total,
@@ -71,6 +59,10 @@ def main():
     epochs = int(sys.argv[2]) if len(sys.argv) > 2 else 30
     batch_size = int(sys.argv[3]) if len(sys.argv) > 3 else 256
     lr = float(sys.argv[4]) if len(sys.argv) > 4 else 1e-3
+    hidden_dim = int(sys.argv[5]) if len(sys.argv) > 5 else 128
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f'Using device: {device}')
 
     print(f'Loading data from {data_path} ...')
     data = np.load(data_path)
@@ -79,38 +71,25 @@ def main():
     if 'v' in data:
         y_value = data['v'].astype(np.float32)
     else:
-        # 兼容旧版无 outcome label 的数据
         y_value = np.zeros_like(y_policy, dtype=np.float32)
 
     n_total = X.shape[0]
     n_val = min(5000, n_total // 10)
     n_train = n_total - n_val
-    X_train, X_val = X[:n_train], X[n_train:]
-    yp_train, yp_val = y_policy[:n_train], y_policy[n_train:]
-    yv_train, yv_val = y_value[:n_train], y_value[n_train:]
+
+    X_train = torch.tensor(X[:n_train], dtype=torch.float32, device=device)
+    X_val = torch.tensor(X[n_train:], dtype=torch.float32, device=device)
+    yp_train = torch.tensor(y_policy[:n_train], dtype=torch.long, device=device)
+    yp_val = torch.tensor(y_policy[n_train:], dtype=torch.long, device=device)
+    yv_train = torch.tensor(y_value[:n_train], dtype=torch.float32, device=device)
+    yv_val = torch.tensor(y_value[n_train:], dtype=torch.float32, device=device)
 
     print(f'Train: {n_train}, Val: {n_val}, features: {X.shape[1]}')
 
-    hidden_dim = int(sys.argv[5]) if len(sys.argv) > 5 else 128
-    model = MahjongNet(input_dim=X.shape[1], hidden_dim=hidden_dim)
-    mx.eval(model.parameters())
-
-    optimizer = optim.Adam(learning_rate=lr)
-
-    def _log_softmax(logits):
-        logits = logits - mx.max(logits, axis=-1, keepdims=True)
-        return logits - mx.log(mx.sum(mx.exp(logits), axis=-1, keepdims=True))
-
-    # 编译损失函数和梯度
-    def loss_fn(model, Xb, yp_b, yv_b):
-        logits, value = model(Xb)
-        log_probs = _log_softmax(logits)
-        policy_loss = -mx.mean(mx.take_along_axis(
-            log_probs, mx.expand_dims(yp_b, -1), axis=-1))
-        value_loss = mx.mean((value.squeeze(-1) - yv_b) ** 2)
-        return policy_loss + 0.5 * value_loss
-
-    loss_and_grad = nn.value_and_grad(model, loss_fn)
+    model = MahjongNet(input_dim=X.shape[1], hidden_dim=hidden_dim).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    criterion_policy = nn.CrossEntropyLoss()
+    criterion_value = nn.MSELoss()
 
     best_val_loss = float('inf')
     out_dir = 'output'
@@ -118,17 +97,27 @@ def main():
 
     for epoch in range(1, epochs + 1):
         start = time.time()
+        model.train()
         train_loss_sum = 0.0
         train_batches = 0
 
-        for Xb, yp_b, yv_b in batch_iterator(X_train, yp_train, yv_train, batch_size):
-            loss, grads = loss_and_grad(model, Xb, yp_b, yv_b)
-            optimizer.update(model, grads)
-            mx.eval(model.parameters(), optimizer.state)
+        perm = torch.randperm(n_train, device=device)
+        for i in range(0, n_train, batch_size):
+            idx = perm[i:i + batch_size]
+            Xb, yp_b, yv_b = X_train[idx], yp_train[idx], yv_train[idx]
+
+            optimizer.zero_grad()
+            logits, value = model(Xb)
+            policy_loss = criterion_policy(logits, yp_b)
+            value_loss = criterion_value(value.squeeze(-1), yv_b)
+            loss = policy_loss + 0.5 * value_loss
+            loss.backward()
+            optimizer.step()
+
             train_loss_sum += float(loss)
             train_batches += 1
 
-        val_metrics = evaluate(model, X_val, yp_val, yv_val, batch_size=batch_size)
+        val_metrics = evaluate(model, X_val, yp_val, yv_val, batch_size=batch_size, device=device)
         elapsed = time.time() - start
         print(f'Epoch {epoch:2d}/{epochs}  '
               f'train_loss={train_loss_sum/train_batches:.4f}  '
@@ -140,12 +129,13 @@ def main():
 
         if val_metrics['loss'] < best_val_loss:
             best_val_loss = val_metrics['loss']
-            model.save_weights(os.path.join(out_dir, 'nn_model.npz'))
+            torch.save(model.state_dict(), os.path.join(out_dir, 'nn_model.pt'))
             with open(os.path.join(out_dir, 'nn_model_config.json'), 'w') as f:
-                json.dump({'input_dim': int(X.shape[1]), 'hidden_dim': hidden_dim}, f)
+                json.dump({'input_dim': int(X.shape[1]), 'hidden_dim': hidden_dim,
+                           'framework': 'pytorch'}, f)
             print('  -> saved best model')
 
-    print('Training complete. Best model at output/nn_model.npz')
+    print('Training complete. Best model at output/nn_model.pt')
 
 
 if __name__ == '__main__':
