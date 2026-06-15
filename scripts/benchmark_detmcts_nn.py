@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Benchmark BeliefExpectimaxV3 with NN leaf vs eval0 leaf vs BeliefExp."""
+"""Benchmark DeterminizedMCTS with NN policy rollout."""
 
 import sys
 import os
@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import agent
 from algo.agents.belief_expectimax import BeliefExpectimaxAgent
-from algo.agents.belief_expectimax_v3 import BeliefExpectimaxV3Agent
+from algo.agents.determinized_mcts import DeterminizedMCTSAgent
 from driver.tournament import run_tournament
 from checker.report import generate_report, compute_metrics, compute_elo
 
@@ -23,25 +23,17 @@ def make_beliefexp():
     return BeliefExpectimaxAgent('BeliefExp', verbose=False)
 
 
-def make_v3_eval0():
-    return BeliefExpectimaxV3Agent('V3-eval0', expectimax_depth=1,
-                                   max_candidates=5, leaf_evaluator='eval0')
+def make_detmcts_eval0():
+    return DeterminizedMCTSAgent('DetMCTS', n_worlds=3, top_k=4, max_workers=1)
 
 
-def make_v3_nn():
-    return BeliefExpectimaxV3Agent('V3-NN', expectimax_depth=1,
-                                   max_candidates=5, leaf_evaluator='nn')
+def make_detmcts_nn():
+    return DeterminizedMCTSAgent('DetMCTS-NN', n_worlds=3, top_k=4,
+                                 max_workers=1, nn_rollout=True)
 
 
-def make_v3_nn_policycan():
-    return BeliefExpectimaxV3Agent('V3-NN-PC', expectimax_depth=1,
-                                   max_candidates=5, leaf_evaluator='nn',
-                                   candidate_policy='nn')
-
-
-AGENTS_CONFIG = [make_baseline, make_beliefexp, make_v3_nn,
-                 make_v3_nn_policycan]
-AGENT_NAMES = ['Baseline', 'BeliefExp', 'V3-NN', 'V3-NN-PC']
+AGENTS_CONFIG = [make_baseline, make_beliefexp, make_detmcts_eval0, make_detmcts_nn]
+AGENT_NAMES = ['Baseline', 'BeliefExp', 'DetMCTS', 'DetMCTS-NN']
 
 
 def main():
@@ -53,13 +45,13 @@ def main():
                              verbose=False, n_workers=workers)
     elapsed = time.time() - start
 
-    path = f'output/results_v3_nn_leaf_{n_games}.pkl'
+    path = f'output/results_detmcts_nn_{n_games}.pkl'
     with open(path, 'wb') as f:
         pickle.dump(results, f)
     print('Raw results saved to:', path)
 
     report_path = generate_report(results, AGENT_NAMES,
-                                  output_path='output/v3_nn_leaf_report.md')
+                                  output_path='output/detmcts_nn_report.md')
     print('Report written to:', report_path)
     print(f'Total time: {elapsed:.1f}s ({elapsed/max(n_games,1):.2f}s per game)')
 

@@ -17,8 +17,16 @@ def _hand_to_array(hand, length=34):
     return arr
 
 
+def _seat(name):
+    return int(name.split('@')[-1]) if '@' in name else 0
+
+
 def _context_features(agent_context, current_hand14, self_name):
-    """返回局面上下文特征（不含手牌），共 141 维。"""
+    """返回局面上下文特征（不含手牌），共 141 维。
+
+    兼容“当前玩家还没在 ctx.discards 里留下记录”、重名或多余记录等边界情况：
+    始终按座位 0..3 重新对齐，把自己座位那一份只保留报听 flag，其余座位当作对手。
+    """
     ctx = agent_context
 
     remaining = ctx.remaining_wall(current_hand14)
@@ -27,19 +35,29 @@ def _context_features(agent_context, current_hand14, self_name):
         t = int(_IDX_TO_TILE[idx])
         rem_arr[idx] = remaining.get(t, 0) / 4.0
 
-    opp_discard_arrs = []
-    tenpai_flags = [1.0 if self_name in ctx.tenpai_players else 0.0]
-    for player in ctx.discards:
-        if player == self_name:
-            continue
-        discard_arr = _hand_to_array(ctx.discards[player]) / 20.0
-        opp_discard_arrs.append(discard_arr)
-        tenpai_flags.append(1.0 if player in ctx.tenpai_players else 0.0)
+    self_seat = _seat(self_name)
+    # 按座位收集已知玩家；同名冲突时优先保留 self_name
+    players_by_seat = {}
+    for p in set(ctx.discards.keys()) | {self_name}:
+        s = _seat(p)
+        if s not in players_by_seat or p == self_name:
+            players_by_seat[s] = p
 
-    while len(opp_discard_arrs) < 3:
-        opp_discard_arrs.append(np.zeros(34, dtype=np.float32))
-    while len(tenpai_flags) < 4:
-        tenpai_flags.append(0.0)
+    opp_discard_arrs = []
+    tenpai_flags = []
+    for s in range(4):
+        p = players_by_seat.get(s)
+        if p is None:
+            # 该座位玩家未知
+            if s != self_seat:
+                opp_discard_arrs.append(np.zeros(34, dtype=np.float32))
+            tenpai_flags.append(0.0)
+        elif s == self_seat:
+            tenpai_flags.append(1.0 if p in ctx.tenpai_players else 0.0)
+        else:
+            discard_arr = _hand_to_array(ctx.discards.get(p, [])) / 20.0
+            opp_discard_arrs.append(discard_arr)
+            tenpai_flags.append(1.0 if p in ctx.tenpai_players else 0.0)
 
     progress = np.array([min(1.0, sum(len(v) for v in ctx.discards.values()) / 84.0)],
                         dtype=np.float32)

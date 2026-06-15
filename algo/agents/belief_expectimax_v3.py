@@ -21,7 +21,7 @@ import algo.eval.v2 as eval_v2
 import algo.eval.v3 as eval_v3
 import algo.eval.opponent as opponent
 from algo.eval.player_belief import PlayerBelief
-from algo.nn import nn_leaf
+from algo.nn import nn_leaf, nn_policy
 
 
 WIN_VALUE = 100.0
@@ -95,12 +95,14 @@ class BeliefExpectimaxV3Agent(agent.Agent):
                  expectimax_depth=1,
                  max_candidates=8,
                  defense_margin=0.03,
-                 leaf_evaluator='eval0'):
+                 leaf_evaluator='eval0',
+                 candidate_policy='eval0'):
         super().__init__(name, verbose)
         self.expectimax_depth = expectimax_depth
         self.max_candidates = max_candidates
         self.defense_margin = defense_margin
         self.leaf_evaluator = leaf_evaluator
+        self.candidate_policy = candidate_policy
         self.context = context_v3.ContextV3()
         self._belief = None
         self._weights_tuple = tuple(sorted(eval_v3.DEFAULT_WEIGHTS.items()))
@@ -232,15 +234,19 @@ class BeliefExpectimaxV3Agent(agent.Agent):
         assert len(self.cur) == 14
         candidates = self._unique_tiles(self.cur)
 
-        # 用 eval0 快速预选 top_k 候选，避免每个候选都跑完整 expectimax
-        scored = []
-        for disc in candidates:
-            hand13 = list(self.cur)
-            hand13.remove(disc)
-            score = eval_v2.evaluate(hand13)
-            scored.append((score, disc))
-        scored.sort(reverse=True)
-        top = [disc for _, disc in scored[:self.max_candidates]]
+        # 预选 top_k 候选：eval0 或 NN policy
+        if self.candidate_policy == 'nn':
+            top = nn_policy.top_discards(self.cur, self.context, self.name,
+                                         self.max_candidates)
+        else:
+            scored = []
+            for disc in candidates:
+                hand13 = list(self.cur)
+                hand13.remove(disc)
+                score = eval_v2.evaluate(hand13)
+                scored.append((score, disc))
+            scored.sort(reverse=True)
+            top = [disc for _, disc in scored[:self.max_candidates]]
 
         if self.leaf_evaluator == 'nn':
             nn_leaf.set_leaf_context(self.context, self.name, list(self.cur))

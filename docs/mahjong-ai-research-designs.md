@@ -573,34 +573,52 @@ Input(34 * channels) -> Conv1D/BN/ReLU -> Conv1D/BN/ReLU
 - 让所有玩家按贪婪 eval0 策略快速 rollout 打完该局；
 - 重复 8 次 rollout，取当前玩家的平均收益作为 value label。
 
-用 BeliefExp 自对弈 **250 局** 生成了约 **11k** 个带 MC value 标签的样本，并训练了一个
-更深的价值网络 `MahjongValueNetDeep`（512→256→128）。
+最终把 MC 数据扩到了 **1000 局 / 46k 样本**，训练了一个更深的价值网络
+`MahjongValueNetDeep`（512→256→128）。
 
 新增脚本：
 - `scripts/train_value_net_mc.py`：用 MC 标签训练深度价值网络；
 - `algo/nn/nn_leaf.py` 会优先加载 `nn_value_model_mc.npz`。
 
-### 150 局 benchmark（6 workers，含 baseline）
+### NN policy 接入 BeliefExpV3 候选 + DetMCTS rollout
+
+- `algo/nn/nn_policy.py`：加载 Policy-Value 网络，为当前手牌生成合法弃牌概率分布；
+- `BeliefExpectimaxV3Agent` 新增 `candidate_policy='nn'`，可用 NN policy 替代 eval0
+  预选候选牌（V3-NN-PC）；
+- `DeterminizedMCTSAgent` 新增 `nn_rollout=True`，可在快速 rollout 中用 NN policy
+  代替 eval0 贪婪策略。
+
+### 自对弈 + 重训练循环
+
+新增 `scripts/self_play_loop.py`：用当前最强的 V3-NN leaf / NN policy 候选自己打数据，
+生成 MC value 标签，然后重新训练 policy-value 网络和深度价值网络，形成迭代闭环。
+
+跑了一次 250 局的自对弈迭代；虽然当前单次迭代没有明显提升胜率（说明还需要更严格的
+模型筛选机制），但整个循环管道已经打通。
+
+### 100 局 benchmark（4 workers，含 baseline）
 
 | Agent | 胜率 | 自摸 | 铳和 | 点炮 | Elo | 平均决策时间 |
 |-------|------|------|------|------|-----|--------------|
-| Baseline | 28.0% | 7.3% | 20.7% | 26.0% | 1520 | 125.6 ms |
-| BeliefExp | 25.3% | 4.0% | 21.3% | 14.0% | 1490 | 83.3 ms |
-| V3-eval0 | 19.3% | 3.3% | 16.0% | 22.0% | 1456 | 57.6 ms |
-| **V3-NN leaf** | **25.3%** | 6.0% | 19.3% | **15.3%** | **1534** | 134.7 ms |
+| Baseline | 26.0% | 7.0% | 19.0% | 23.0% | 1605 | 105.2 ms |
+| BeliefExp | 29.0% | 7.0% | 22.0% | 10.0% | 1529 | 70.6 ms |
+| V3-NN | 21.0% | 7.0% | 14.0% | 23.0% | 1488 | 79.9 ms |
+| V3-NN-PC | 20.0% | 5.0% | 15.0% | 14.0% | 1378 | 81.6 ms |
+
+*注：100 局方差较大；之前 150 局测试中 V3-NN leaf 的 Elo 曾超过 baseline。整体看 NN
+ 改进对防守（降低点炮率）有帮助，但胜率尚未稳定领先。*
 
 ### 结论
 
-- 批量叶子评估后，V3-NN leaf 的**速度已接近 BeliefExp 水平**（~85–135 ms/步），不再
-  是瓶颈。
-- MC rollout 标签 + 深度价值网络让 V3-NN leaf 的 **Elo（1534）超过 baseline（1520）**，
-  同时**点炮率（15.3%）明显低于 baseline（26.0%）**，攻防更均衡。
-- 胜率上 V3-NN leaf 与 BeliefExp 持平（25.3%），但点炮率比 BeliefExp 略高（15.3% vs
-  14.0%）。
-- 下一步可继续：
-  1. 扩大 MC 数据量到 500–1000 局；
-  2. 把 MC value model 也接入 DetMCTS 的 rollout；
-  3. 尝试用更复杂的网络（ResNet / Attention）替代当前 MLP。
+- 批量叶子评估让 V3-NN leaf 速度进入可用范围（~80 ms/步）。
+- MC rollout 标签 + 深度价值网络、NN policy 候选、DetMCTS NN rollout、自对弈循环
+  四条线都已实现并跑通。
+- 当前 V3-NN leaf 在 100–150 局尺度上与 BeliefExp/baseline 互有胜负，**防守点炮率**
+  通常更低，但**胜率优势还不稳定**。
+- 后续要继续提升，建议：
+  1. 在自对弈循环里加入“新模型必须打赢旧模型才替换”的筛选；
+  2. 把 MC 数据扩到 2000–5000 局，或直接用当前最强 agent（V3-NN）生成数据；
+  3. 尝试 ResNet / Attention 结构或更长的 MC rollout。
 
 ---
 

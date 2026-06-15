@@ -49,6 +49,82 @@ def _fast_rollout_select(hand14):
 
 
 # ---------------------------------------------------------------------------
+# NN policy rollout worker
+# ---------------------------------------------------------------------------
+
+def _simulate_one_nn(args):
+    """在一个采样世界里用 NN policy 作为 rollout policy 评估候选弃牌。"""
+    from algo.nn import nn_policy
+
+    (candidate, current_hand, opp_hands, wall,
+     public_ctx_dict, locked_indices, rollout_depth) = args
+
+    ctx = context_v3.ContextV3()
+    ctx.used = public_ctx_dict['used'].copy()
+    ctx.all_seen = public_ctx_dict['all_seen'].copy()
+    ctx.discards = {p: list(seq) for p, seq in public_ctx_dict['discards'].items()}
+    ctx.tenpai_players = set(public_ctx_dict['tenpai_players'])
+
+    cur_hand = list(current_hand)
+    cur_hand.remove(candidate)
+    hands = [
+        cur_hand,
+        list(opp_hands[0]),
+        list(opp_hands[1]),
+        list(opp_hands[2]),
+    ]
+    # 带座位号的名字，让特征层能正确对齐自己/对手
+    player_names = ['cur@0', 'opp1@1', 'opp2@2', 'opp3@3']
+    wall = list(wall)
+    turn = 1
+    current_idx = 0
+    locked = set(locked_indices)
+
+    max_steps = rollout_depth if rollout_depth > 0 else 10000
+    step = 0
+
+    while wall and step < max_steps:
+        drawn = wall.pop(0)
+        hands[turn].append(drawn)
+
+        if eval_v2.is_win(hands[turn]):
+            return 1.0 if turn == current_idx else -0.3
+
+        if turn in locked:
+            discarded = drawn
+            hands[turn].remove(discarded)
+        else:
+            discarded = nn_policy.top_discards(hands[turn], ctx,
+                                               player_names[turn], 1)[0]
+            hands[turn].remove(discarded)
+
+        for j in range(4):
+            if j == turn:
+                continue
+            if eval_v2.is_win(hands[j] + [discarded]):
+                if j == current_idx:
+                    return 1.0
+                if turn == current_idx:
+                    return -1.0
+                return -0.3
+
+        ctx.see_tile(discarded, player_names[turn])
+
+        if (turn not in locked and len(hands[turn]) == 13 and
+                eval_v2.shanten(hands[turn]) == 0):
+            rem = ctx.remaining_wall(hands[turn])
+            waits = eval_v2.winning_tiles(hands[turn], rem)
+            if sum(rem.get(t, 0) for t in waits) >= 3:
+                locked.add(turn)
+                ctx.declare_tenpai(player_names[turn])
+
+        turn = (turn + 1) % 4
+        step += 1
+
+    return 0.0
+
+
+# ---------------------------------------------------------------------------
 # Top-level picklable rollout worker
 # ---------------------------------------------------------------------------
 
@@ -225,7 +301,8 @@ class DeterminizedMCTSAgent(agent.Agent):
                  max_workers=1,
                  rollout_depth=0,
                  top_k=6,
-                 belief_exp_rollout=False):
+                 belief_exp_rollout=False,
+                 nn_rollout=False):
         super().__init__(name, verbose)
         self.n_worlds = n_worlds
         self.n_rollouts_per_world = n_rollouts_per_world
@@ -233,6 +310,7 @@ class DeterminizedMCTSAgent(agent.Agent):
         self.rollout_depth = rollout_depth
         self.top_k = top_k
         self.belief_exp_rollout = belief_exp_rollout
+        self.nn_rollout = nn_rollout
         self.context = context_v3.ContextV3()
 
     def init_tiles(self, l):
@@ -323,7 +401,12 @@ class DeterminizedMCTSAgent(agent.Agent):
                     tasks.append((candidate, list(self.cur), opp_hands, wall,
                                   public_ctx, [], self.rollout_depth))
 
-        sim_fn = _simulate_one_belief if self.belief_exp_rollout else _simulate_one
+        if self.nn_rollout:
+            sim_fn = _simulate_one_nn
+        elif self.belief_exp_rollout:
+            sim_fn = _simulate_one_belief
+        else:
+            sim_fn = _simulate_one
         if self.max_workers <= 1:
             rewards = list(map(sim_fn, tasks))
         else:
