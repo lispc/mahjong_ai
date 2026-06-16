@@ -12,7 +12,7 @@
 一个**晋北麻将 AI 研究与对战平台**，核心围绕：
 - 规则：推倒胡、不能吃牌、报听后锁手牌。
 - 算法：ExpectiMax / MCTS + 神经网络（Policy-Value Net + Deep Value Net）。
-- 当前最强 agent：`BeliefExpectimaxV3Agent`（V3-NN-BE1），见 `docs/handoff.md`。
+- 当前最强 agent：`BeliefExpectimaxV3Agent`（V3-NN-PC），见 `docs/handoff.md`。
 
 ---
 
@@ -21,19 +21,28 @@
 ### 2.1 推荐环境
 
 - **conda**: `/home/scroll/miniforge3`
-- **环境名**: `mahjong`
-- **Python**: 3.10
+- **主环境名**: `mahjong`（Python 3.10，PyTorch CUDA）
+- **PyPy 环境名**: `pypy39`（Python 3.9 + PyPy 7.3.15，用于 MC value 计算）
 - **激活方式**:
   ```bash
   source /home/scroll/miniforge3/etc/profile.d/conda.sh
-  conda activate mahjong
+  conda activate mahjong      # NN 训练/推理、自对弈生成、benchmark
+  conda activate pypy39       # legacy eval2 MC value 计算
   ```
 
 ### 2.2 关键依赖
 
+主环境 `mahjong`：
 ```bash
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
 pip install numba numpy cython
+```
+
+PyPy 环境 `pypy39`：
+```bash
+mamba create -n pypy39 python=3.9.18=1_73_pypy pip numpy -c conda-forge -y
+conda activate pypy39
+pip install numpy
 ```
 
 > **注意**：NN 后端已切换到 **PyTorch**。原 MLX 版本备份在 `algo/nn/model_mlx.py`、`algo/nn/value_model_mlx.py`、`scripts/train_nn_mlx.py`、`scripts/train_value_net_mc_mlx.py`。由于 PyTorch 与 MLX 的 CUDA 包版本冲突，**不要同时在一个环境里安装两者**。如需恢复 MLX 实验，请另建环境。
@@ -59,7 +68,8 @@ PYTHONPATH=. python tmp/benchmark_new_models.py 50 4
 
 - **GPU 用于 NN 推理/训练**；
 - **CPU 用于对局模拟和 MC rollout**；
-- **瓶颈通常在 CPU 上的 MC rollout**，而不是 GPU 训练。
+- **legacy eval2 MC rollout 是 CPU 瓶颈**，用 PyPy 可加速 2-3 倍；
+- **PyPy 不能 import Numba/torch**，因此 MC value 计算脚本必须保持纯 Python 依赖。
 
 ### 3.2 自对弈数据生成（GPU 并行）
 
@@ -69,37 +79,48 @@ PYTHONPATH=. python tmp/benchmark_new_models.py 50 4
 bash scripts/generate_selfplay_4gpu.sh <总局数> <每 GPU workers> <seed_base>
 ```
 
-示例（1000 局，每 GPU 32 workers，共 128 逻辑核跑满）：
+示例（5000 局，每 GPU 32 workers，共 128 逻辑核跑满）：
 ```bash
-bash scripts/generate_selfplay_4gpu.sh 1000 32 800000
+bash scripts/generate_selfplay_4gpu.sh 5000 32 900000
 ```
 
 这会在后台启动 4 个进程，分别用 `CUDA_VISIBLE_DEVICES=0/1/2/3`，输出：
-- `output/selfplay_raw_1000_gpu{0,1,2,3}.pkl`
-- `output/selfplay_raw_1000_gpu{0,1,2,3}.log`
+- `output/selfplay_raw_5000_gpu{0,1,2,3}.pkl`
+- `output/selfplay_raw_5000_gpu{0,1,2,3}.log`
 
-### 3.3 MC rollout value label 计算（CPU 并行）
+### 3.3 MC rollout value label 计算（PyPy + CPU 并行）
 
-MC rollout 中所有玩家用 Baseline（`algo.select` / eval2）决策，是纯 CPU 任务，应开满 128 核：
+MC rollout 中所有玩家用 legacy eval2（`algo.select`）决策，是纯 Python 任务。PyPy 对 eval2 有显著加速。
+
+推荐做法：
+1. 把 `output/selfplay_raw_N.pkl` 拆成 4 份；
+2. 每份用 PyPy 32 workers 并行计算；
+3. 最后合并 4 份 `.npz`。
 
 ```bash
-PYTHONPATH=. python scripts/compute_mc_values.py \
-  output/selfplay_raw_1000.pkl \
-  output/nn_training_data_selfplay_baseline_rollout_1000.npz \
-  4 128
+source /home/scroll/miniforge3/etc/profile.d/conda.sh
+conda activate pypy39
+export PYTHONPATH=.
+for p in 0 1 2 3; do
+    pypy3 scripts/compute_mc_values.py \
+        output/selfplay_raw_5000_part${p}.pkl \
+        output/nn_training_data_selfplay_baseline_rollout_5000_part${p}.npz \
+        4 32 240 200 250 > output/compute_mc_values_pypy_5000_part${p}.log 2>&1 &
+done
+wait
 ```
 
-参数含义：`<raw.pkl> <out.npz> <n_rollouts> <n_workers>`。
+参数含义：`<raw.pkl> <out.npz> <n_rollouts> <n_workers> <timeout_per_task> <max_steps> <save_every>`。
 
-> 若仍太慢，可进一步把每个样本的多次 rollout 拆成独立任务（当前是每个 worker 串行跑完 4 次 rollout），但 128 workers 时 CPU 通常已满载。
+> **关键优化**：`algo/eval/legacy.py` 的 `_eval0_cache` 已改为 `functools.lru_cache(maxsize=1_000_000)`。若无此限制，PyPy 长任务下每个 worker 的 cache 会无限增长，导致内存耗尽、BrokenProcessPool 或 OOM。
 
 ### 3.4 训练（GPU 0 即可）
 
 模型很小（Policy-Value ~45k 参数，Deep Value ~100k 参数），单 GPU 训练 60 epochs 只需 ~1 分钟，不需要多卡 DDP。
 
 ```bash
-PYTHONPATH=. python scripts/train_nn.py output/nn_training_data_merged.npz 60 256 0.001 256
-PYTHONPATH=. python scripts/train_value_net_mc.py output/nn_training_data_merged.npz 60 256 0.001 512,256,128
+PYTHONPATH=. python scripts/train_nn.py output/nn_training_data_selfplay_baseline_rollout_5000.npz 60 256 0.001 256
+PYTHONPATH=. python scripts/train_value_net_mc.py output/nn_training_data_selfplay_baseline_rollout_5000.npz 60 256 0.001 512,256,128
 ```
 
 ### 3.5 Benchmark / Tournament
@@ -107,27 +128,27 @@ PYTHONPATH=. python scripts/train_value_net_mc.py output/nn_training_data_merged
 `driver/tournament.py` 使用 `ProcessPoolExecutor`，默认按 `n_workers` 并行。推荐：
 
 ```bash
-PYTHONPATH=. python tmp/benchmark_new_models.py 200 4
+bash scripts/benchmark_4gpu.sh 400 4
 ```
 
-> 注意：tournament 里每个 worker 也会加载 PyTorch 模型做 NN 推理，4 workers 共享 GPU 0。若想让 tournament 也利用 4 GPU，可手动拆成 4 个独立进程分别跑不同 benchmark，或改造 tournament 支持按 worker 分配 GPU。
+这会按 GPU 拆 4 个独立 benchmark 进程，每 GPU 跑 100 局、4 workers，充分利用 4 张卡。
 
 ### 3.6 监控资源利用率
 
 ```bash
-# CPU / 负载
-watch -n 1 'top -bn1 | grep -E "load|Cpu" | head -3'
+# CPU / 负载 / 内存
+watch -n 1 'top -bn1 | grep -E "load|Cpu|MiB Mem" | head -5'
 
 # GPU
 watch -n 1 'nvidia-smi --query-gpu=index,utilization.gpu,memory.used --format=csv'
 
 # 某个后台任务进度
-tail -f output/compute_mc_values_1000.log
+tail -f output/compute_mc_values_pypy_5000_part0.log
 ```
 
 目标：
 - 数据生成阶段：4 GPU 都接近 100%，CPU 也接近满载。
-- MC rollout 阶段：CPU 接近 100%，GPU 接近 0%。
+- MC rollout 阶段：CPU 接近 100%，GPU 接近 0%，内存占用稳定在 ~200-400 GiB。
 - 训练阶段：GPU 0 高占用，CPU 低占用。
 
 ---
@@ -136,11 +157,11 @@ tail -f output/compute_mc_values_1000.log
 
 ```python
 BeliefExpectimaxV3Agent(
-    'V3-NN',
+    'V3-NN-PC',
     expectimax_depth=1,
     max_candidates=5,
     leaf_evaluator='nn',
-    candidate_policy='baseline_eval1',
+    candidate_policy='nn',
     verbose=False,
 )
 ```
@@ -148,6 +169,10 @@ BeliefExpectimaxV3Agent(
 对应模型（PyTorch `.pt`）：
 - `output/nn_model.pt` + `output/nn_model_config.json`
 - `output/nn_value_model_mc.pt` + `output/nn_value_model_mc_config.json`
+
+备份：
+- `output/nn_model_best_1552.pt` / `output/nn_value_model_mc_best_1552.pt`
+- `output/nn_model_best_1524.pt` / `output/nn_value_model_mc_best_1524.pt`（旧 best）
 
 详见 `docs/handoff.md`。
 
@@ -170,9 +195,10 @@ BeliefExpectimaxV3Agent(
 
 | 文件 | 说明 |
 |---|---|
+| `output/nn_training_data_selfplay_baseline_rollout_2000.npz` | 25569 条 2000 局 baseline rollout 数据（当前 best 来源） |
+| `output/nn_training_data_selfplay_baseline_rollout_1000.npz` | 12835 条 1000 局 baseline rollout 数据 |
 | `output/nn_training_data_mc.npz` | 46k 历史 MC 数据（BeliefExp + eval0 rollout） |
 | `output/nn_training_data_selfplay.npz` | 50k 历史 V3-NN 自对弈数据 |
-| `output/nn_training_data_merged.npz` | 96k 合并数据 |
 | `output/selfplay_raw_*.pkl` | 原始自对弈样本（context, hand14, action, features），等待计算 MC value |
 
 ### 5.3 模型文件格式
@@ -191,41 +217,38 @@ BeliefExpectimaxV3Agent(
 PYTHONPATH=. python run_tests.py
 
 # 训练
-PYTHONPATH=. python scripts/train_nn.py output/nn_training_data_merged.npz 60 256 0.001 256
-PYTHONPATH=. python scripts/train_value_net_mc.py output/nn_training_data_merged.npz 60 256 0.001 512,256,128
+PYTHONPATH=. python scripts/train_nn.py output/nn_training_data_selfplay_baseline_rollout_2000.npz 60 256 0.001 256
+PYTHONPATH=. python scripts/train_value_net_mc.py output/nn_training_data_selfplay_baseline_rollout_2000.npz 60 256 0.001 512,256,128
 
 # 自对弈数据生成（4 GPU）
-bash scripts/generate_selfplay_4gpu.sh 1000 32 800000
+bash scripts/generate_selfplay_4gpu.sh 5000 32 900000
 
 # 合并 4 GPU 的 pkl（示例）
 PYTHONPATH=. python -c "
-import pickle, os
+import pickle, glob
 all_samples = []
-for gpu in range(4):
-    with open(f'output/selfplay_raw_1000_gpu{gpu}.pkl', 'rb') as f:
+for pkl in sorted(glob.glob('output/selfplay_raw_5000_gpu*.pkl')):
+    with open(pkl, 'rb') as f:
         all_samples.extend(pickle.load(f))
-with open('output/selfplay_raw_1000.pkl', 'wb') as f:
+with open('output/selfplay_raw_5000.pkl', 'wb') as f:
     pickle.dump(all_samples, f)
 print(len(all_samples))
 "
 
-# 计算 MC value label（128 CPU）
-PYTHONPATH=. python scripts/compute_mc_values.py \
-  output/selfplay_raw_1000.pkl \
-  output/nn_training_data_selfplay_baseline_rollout_1000.npz 4 128
+# 计算 MC value label（PyPy，4 parts 并行）
+source /home/scroll/miniforge3/etc/profile.d/conda.sh
+conda activate pypy39
+export PYTHONPATH=.
+for p in 0 1 2 3; do
+    pypy3 scripts/compute_mc_values.py \
+        output/selfplay_raw_5000_part${p}.pkl \
+        output/nn_training_data_selfplay_baseline_rollout_5000_part${p}.npz \
+        4 32 240 200 250 > output/compute_mc_values_pypy_5000_part${p}.log 2>&1 &
+done
+wait
 
-# 合并历史 + 新数据
-PYTHONPATH=. python -c "
-from scripts.self_play_loop import merge_data_files
-merge_data_files(
-    'output/nn_training_data_merged_v2.npz',
-    'output/nn_training_data_mc.npz',
-    'output/nn_training_data_selfplay_baseline_rollout_1000.npz'
-)
-"
-
-# Benchmark
-PYTHONPATH=. python tmp/benchmark_new_models.py 200 4
+# Benchmark（4 GPU）
+bash scripts/benchmark_4gpu.sh 400 4
 ```
 
 ---
@@ -233,11 +256,13 @@ PYTHONPATH=. python tmp/benchmark_new_models.py 200 4
 ## 7. 已知问题与注意事项
 
 1. **MLX 与 PyTorch 不能共存**：当前 `mahjong` 环境只装 PyTorch。恢复 MLX 需另建环境。
-2. **DataCollector 保存的是决策前状态**：`algo/agents/data_collectors.py` 中 `hand14` 和 `context` 快照必须在 `super().next()` 之前捕获，否则 MC rollout 会拿到不一致的 13 张手牌 / 弃牌后 context。
-3. **`mc_value._greedy_discard` 返回 tile**：`algo.select(...)[0]` 返回的是 `(metric, tile)` 元组，取 tile 要用 `[0][1]`。
-4. **tournament 默认只用一个 GPU**：大规模 benchmark 时若 GPU 0 成为瓶颈，可拆进程或改造 tournament。
-5. **输出目录 `output/` 被 gitignore，但 config json 被跟踪**：修改模型配置后记得提交 `.json` 文件。
-6. **不要提交 `.venv/`**：已加入 `.gitignore`。
+2. **PyPy 不能 import Numba**：`algo/nn/mc_value.py` 已做兼容，PyPy 下自动跳过 `fast_eval` import。
+3. **legacy eval2 cache 必须限制大小**：`algo/eval/legacy.py` 使用 `lru_cache(maxsize=1_000_000)`，避免 PyPy 长任务内存爆炸。
+4. **DataCollector 保存的是决策前状态**：`algo/agents/data_collectors.py` 中 `hand14` 和 `context` 快照必须在 `super().next()` 之前捕获，否则 MC rollout 会拿到不一致的 13 张手牌 / 弃牌后 context。
+5. **`mc_value._greedy_discard` 返回 tile**：`algo.select(...)[0]` 返回的是 `(metric, tile)` 元组，取 tile 要用 `[0][1]`。
+6. **tournament 默认只用一个 GPU**：大规模 benchmark 时若 GPU 0 成为瓶颈，用 `scripts/benchmark_4gpu.sh` 拆 4 进程。
+7. **输出目录 `output/` 被 gitignore，但 config json 被跟踪**：修改模型配置后记得提交 `.json` 文件。
+8. **不要提交 `.venv/`**：已加入 `.gitignore`。
 
 ---
 
@@ -246,7 +271,7 @@ PYTHONPATH=. python tmp/benchmark_new_models.py 200 4
 1. 读 `docs/handoff.md` 确认当前最强配置和下一步。
 2. 若下一步是自对弈迭代：
    - 用 `generate_selfplay_4gpu.sh` 生成原始样本；
-   - 用 `compute_mc_values.py` 计算 MC value label；
+   - 拆成 4 份，用 PyPy `compute_mc_values.py` 计算 MC value label；
    - 合并数据 → 训练 candidate → benchmark → 按 Elo 门限决定是否替换。
 3. 若下一步是算法实验：先改 agent/eval，再跑 `tmp/benchmark_new_models.py` 或新建 benchmark 脚本验证。
 

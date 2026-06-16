@@ -13,10 +13,10 @@ SEED_BASE=${3:-800000}
 PER_GPU=$((N_GAMES / 4))
 
 for GPU in 0 1 2 3; do
-    OUT="output/selfplay_raw_1000_gpu${GPU}.pkl"
+    OUT="output/selfplay_raw_${N_GAMES}_gpu${GPU}.pkl"
     SEED=$((SEED_BASE + GPU * PER_GPU))
     echo "Starting GPU $GPU: $PER_GPU games, seed $SEED -> $OUT"
-    CUDA_VISIBLE_DEVICES=$GPU python scripts/generate_selfplay_raw.py $PER_GPU $N_WORKERS $OUT $SEED > output/selfplay_raw_1000_gpu${GPU}.log 2>&1 &
+    CUDA_VISIBLE_DEVICES=$GPU python scripts/generate_selfplay_raw.py $PER_GPU $N_WORKERS $OUT $SEED > output/selfplay_raw_${N_GAMES}_gpu${GPU}.log 2>&1 &
 done
 
 wait

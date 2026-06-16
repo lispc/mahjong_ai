@@ -282,7 +282,17 @@ def is_succ(l):
     return eval_naive(l).is_succ()
 
 
-_eval0_cache = {}
+from functools import lru_cache
+
+
+@lru_cache(maxsize=1_000_000)
+def _eval0_cached(counts_tuple):
+    """用 LRU cache 限制 eval0 缓存大小，避免长任务内存无限增长。"""
+    tiles = []
+    for i, n in enumerate(counts_tuple):
+        if n:
+            tiles.extend([_TILE_IDS[i]] * n)
+    return eval_naive(tiles).metric()
 
 
 def _eval0_key(tiles):
@@ -292,13 +302,7 @@ def _eval0_key(tiles):
 
 
 def eval0(l, c=_DEFAULT_CONTEXT):
-    key = _eval0_key(l)
-    result = _eval0_cache.get(key)
-    if result is not None:
-        return result
-    result = eval_naive(l).metric()
-    _eval0_cache[key] = result
-    return result
+    return _eval0_cached(_eval0_key(l))
 
 
 def eval_rec(tiles, f, c=_DEFAULT_CONTEXT, verbose=False):
