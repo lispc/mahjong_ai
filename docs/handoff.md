@@ -6,7 +6,7 @@
 
 ## 1. 当前最强配置
 
-经过 2000 局 legacy eval2 baseline rollout 数据训练，**V3-NN-PC** 成为当前最强配置：
+经过 **5000 局** legacy eval2 baseline rollout 数据训练，**V3-NN-PC** 成为当前最强配置：
 
 ```python
 BeliefExpectimaxV3Agent(
@@ -22,13 +22,13 @@ BeliefExpectimaxV3Agent(
 
 ```
 Agent        win      self     ron      deal-in    draw     Elo      avg_ms
-Baseline     0.278    0.065    0.212    0.228      0.037    1484     342.9
-BeliefExp    0.275    0.085    0.190    0.130      0.037    1543     229.2
-V3-NN-BE1    0.242    0.062    0.180    0.177      0.037    1421     172.8
-V3-NN-PC     0.168    0.037    0.130    0.177      0.037    1552     155.2
+Baseline     0.285    0.075    0.210    0.253      0.035    1470     341.0
+BeliefExp    0.275    0.087    0.188    0.147      0.035    1495     228.6
+V3-NN        0.233    0.065    0.168    0.150      0.035    1455     171.6
+V3-NN-PC     0.172    0.040    0.133    0.147      0.035    1581     155.0
 ```
 
-V3-NN-PC Elo 1552，超过旧 best V3-NN-BE1（Elo ~1524）约 +28。
+V3-NN-PC Elo **1581**，超过 2000 局版本的 1552 约 +29，超过旧 best V3-NN-BE1（Elo ~1524）约 +57。
 
 对应模型（PyTorch `.pt`）：
 
@@ -39,10 +39,11 @@ V3-NN-PC Elo 1552，超过旧 best V3-NN-BE1（Elo ~1524）约 +28。
 
 备份：
 
+- `output/nn_model_best_1581.pt` / `output/nn_value_model_mc_best_1581.pt`
 - `output/nn_model_best_1552.pt` / `output/nn_value_model_mc_best_1552.pt`
 - `output/nn_model_best_1524.pt` / `output/nn_value_model_mc_best_1524.pt`（旧 best）
 
-> 注意：本次 2000 局训练中，**candidate_policy='baseline_eval1' 的 V3-NN 表现较差**（1421），而 candidate_policy='nn' 的 V3-NN-PC 更强。后续建议默认使用 V3-NN-PC。
+> 注意：**candidate_policy='baseline_eval1' 的 V3-NN 持续弱于 candidate_policy='nn' 的 V3-NN-PC**。5000 局中 V3-NN 仅 1455，而 V3-NN-PC 达到 1581。后续默认使用 V3-NN-PC。
 
 ---
 
@@ -56,6 +57,7 @@ V3-NN-PC Elo 1552，超过旧 best V3-NN-BE1（Elo ~1524）约 +28。
 | `output/nn_model_config.json` | policy net 配置 |
 | `output/nn_value_model_mc.pt` | 当前 deep value 网络权重（PyTorch） |
 | `output/nn_value_model_mc_config.json` | value net 配置 |
+| `output/nn_training_data_selfplay_baseline_rollout_5000.npz` | 68529 条 5000 局 baseline rollout MC value 数据 |
 | `output/nn_training_data_selfplay_baseline_rollout_2000.npz` | 25569 条 2000 局 baseline rollout MC value 数据 |
 | `output/nn_training_data_selfplay_baseline_rollout_1000.npz` | 12835 条 1000 局 baseline rollout MC value 数据 |
 

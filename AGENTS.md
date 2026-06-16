@@ -171,10 +171,11 @@ BeliefExpectimaxV3Agent(
 - `output/nn_value_model_mc.pt` + `output/nn_value_model_mc_config.json`
 
 备份：
+- `output/nn_model_best_1581.pt` / `output/nn_value_model_mc_best_1581.pt`
 - `output/nn_model_best_1552.pt` / `output/nn_value_model_mc_best_1552.pt`
 - `output/nn_model_best_1524.pt` / `output/nn_value_model_mc_best_1524.pt`（旧 best）
 
-详见 `docs/handoff.md`。
+当前 best V3-NN-PC Elo **1581**（5000 局 baseline rollout 训练），详见 `docs/handoff.md`。
 
 ---
 
