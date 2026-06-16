@@ -93,79 +93,36 @@ PYTHONPATH=. python tmp/benchmark_new_models.py 100 4
 
 ## 5. 建议的后续路径
 
-### 5.1 已验证：PyPy 能大幅加速 legacy eval2 MC value 计算
+### 5.1 已验证：CPython 64 workers 是 baseline rollout 的甜点
 
-- 已实现 `mc_value.py` 在 PyPy 下跳过 Numba fast_eval import，仅使用纯 Python 的 legacy eval2。
-- 通过把 `algo/eval/legacy.py` 的 `_eval0_cache` 改为 `functools.lru_cache(maxsize=1_000_000)`，解决了 PyPy 长任务内存无限增长导致的 OOM / BrokenProcessPool 问题。
-- 2000 局（25569 样本 × 4 rollouts）在 128 CPU core 机器上用 4 parts × 32 workers PyPy 约 23 分钟完成，比 CPython 估计快 2-3 倍。
+- 在 128 CPU core 机器上，单 part 64 workers 跑 100 样本约 70s，96/128 workers 收益很小。
+- 4 parts × 32 workers 并发会严重抢 CPU/cache，反而比 2 parts × 64 workers 慢很多。
+- 推荐并发策略：**2 parts × 64 workers**，两批跑完 4 parts。
 
-### 5.2 继续放大 baseline rollout 数据规模（推荐下一步）
+### 5.2 已验证：nnpolicy rollout 不可行
 
-既然 PyPy 把 MC value 计算瓶颈解除，可以跑 5000–10000 局自对弈 + legacy eval2 baseline rollout，看 V3-NN-PC 是否还能再提升。
+- 尝试用训练好的 Policy Net top-1 作为 MC rollout policy，生成 10000 局（134,358 样本）。
+- 训练出的 V3-NN-PC 在 400 局 benchmark 中 Elo 仅 **1386**，远低于当前 best **1581**。
+- 结论：NN policy 作为 rollout policy 太弱，value label 质量差，导致模型退化。应继续使用 **baseline (`algo.select`) rollout**。
+
+### 5.3 继续放大 baseline rollout 数据规模（进行中）
+
+已推送一键过夜脚本：
 
 ```bash
-# 1. 生成 5000 局（4 GPU 约 25 分钟）
-bash scripts/generate_selfplay_4gpu.sh 5000 32
-
-# 2. 合并 pkl
-source /home/scroll/miniforge3/etc/profile.d/conda.sh
-conda activate mahjong
-PYTHONPATH=. python -c "
-import pickle, glob
-all_samples = []
-for pkl in sorted(glob.glob('output/selfplay_raw_5000_gpu*.pkl')):
-    with open(pkl, 'rb') as f:
-        all_samples.extend(pickle.load(f))
-with open('output/selfplay_raw_5000.pkl', 'wb') as f:
-    pickle.dump(all_samples, f)
-print(len(all_samples))
-"
-
-# 3. 拆成 4 份（PyPy 每 part 32 workers，降低单进程内存压力）
-PYTHONPATH=. python -c "
-import pickle
-n = 4
-raw = pickle.load(open('output/selfplay_raw_5000.pkl','rb'))
-chunk = (len(raw) + n - 1) // n
-for p in range(n):
-    part = raw[p*chunk:(p+1)*chunk]
-    with open(f'output/selfplay_raw_5000_part{p}.pkl','wb') as f:
-        pickle.dump(part, f)
-"
-
-# 4. 用 PyPy 计算 MC value（4 parts 并行，每 part 32 workers）
-source /home/scroll/miniforge3/etc/profile.d/conda.sh
-conda activate pypy39
-export PYTHONPATH=.
-for p in 0 1 2 3; do
-    pypy3 scripts/compute_mc_values.py \
-        output/selfplay_raw_5000_part${p}.pkl \
-        output/nn_training_data_selfplay_baseline_rollout_5000_part${p}.npz \
-        4 32 240 200 250 > output/compute_mc_values_pypy_5000_part${p}.log 2>&1 &
-done
-wait
-
-# 5. 合并
-conda activate mahjong
-PYTHONPATH=. python -c "
-import numpy as np, glob
-parts = sorted(glob.glob('output/nn_training_data_selfplay_baseline_rollout_5000_part*.npz'))
-Xs, ys, vs, qs = [], [], [], []
-for f in parts:
-    d = np.load(f)
-    Xs.append(d['X']); ys.append(d['y']); vs.append(d['v']); qs.append(d['q'])
-X = np.concatenate(Xs); y = np.concatenate(ys); v = np.concatenate(vs); q = np.concatenate(qs)
-np.savez_compressed('output/nn_training_data_selfplay_baseline_rollout_5000.npz', X=X, y=y, v=v, q=q)
-print(X.shape)
-"
-
-# 6. 训练
-PYTHONPATH=. python scripts/train_nn.py output/nn_training_data_selfplay_baseline_rollout_5000.npz 60 256 0.001 256
-PYTHONPATH=. python scripts/train_value_net_mc.py output/nn_training_data_selfplay_baseline_rollout_5000.npz 60 256 0.001 512,256,128
-
-# 7. benchmark（4 GPU）
-bash scripts/benchmark_4gpu.sh 400 4
+bash scripts/overnight_baseline_10000.sh
 ```
+
+它会自动完成：
+1. part0 + part1 baseline rollout（各 64 workers）
+2. part2 + part3 baseline rollout（各 64 workers）
+3. 合并为 `output/nn_training_data_baseline_rollout_10000.npz`
+4. 训练 policy-value net + deep value net
+5. 跑 400 局 4-GPU benchmark 并汇总
+
+预计总耗时约 **13 小时**。运行前会自动备份当前 best 模型到 `output/best_before_overnight/`。
+
+如果需要分步手动执行，参考脚本内容即可。
 
 ### 5.3 单独优化 candidate policy
 

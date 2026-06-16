@@ -118,8 +118,8 @@ pypy3 scripts/tune_weights_cem.py
 | MCTSAgent | `algo/agents/mcts.py` | `algo.eval.v2` | 采样版 ExpectiMax |
 | MCTSEval2Agent | `algo/agents/mcts_eval2.py` | `algo.eval.legacy` | MCTS + eval2 叶子评估 |
 | Eval2Ctx+BD | `algo/agents/expectimax_eval2.py` | `algo.eval.legacy` + `opponent` | 实验性对手建模防守 |
-| **V3-NN** | `algo/agents/belief_expectimax_v3.py` | `algo.eval.v3` + `algo.nn` | 默认配置：`baseline_eval1` 候选 + NN leaf |
-| V3-NN-PC | `algo/agents/belief_expectimax_v3.py` | `algo.eval.v3` + `algo.nn` | NN policy 候选 + NN leaf |
+| V3-NN | `algo/agents/belief_expectimax_v3.py` | `algo.eval.v3` + `algo.nn` | `baseline_eval1` 候选 + NN leaf |
+| **V3-NN-PC** | `algo/agents/belief_expectimax_v3.py` | `algo.eval.v3` + `algo.nn` | NN policy 候选 + NN leaf（当前最强） |
 | DeterminizedMCTS | `algo/agents/determinized_mcts.py` | `algo.eval.v2` + rollout | 支持 NN/BeliefExp rollout |
 
 ## NN Agent 与自对弈
