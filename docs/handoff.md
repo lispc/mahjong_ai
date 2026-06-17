@@ -152,11 +152,35 @@ DetMCTS + NN value 截断已快速验证：400 局 benchmark Elo 仅 **1315**，
 
 当前已恢复 `output/nn_model.pt` / `output/nn_value_model_mc.pt` 为 best_1581（175 维）。
 
+#### 已验证失败的其他方向
+
+- **DetMCTS / MCTS 替代 ExpectiMax**
+  - Flat MC（10 worlds × 6 candidates，fast rollout）：Elo ~1391，决策时间 ~211ms
+  - NN rollout（3 worlds × 4 candidates）：Elo ~1353，决策时间 ~394ms
+  - 结论：当前 DetMCTS 实现无法替代 BeliefExpectimax/V3-NN-PC。
+
+- **V3-NN-PC 配置调优**
+  - 测试了 max_candidates / expectimax_depth / defense_margin 的多种组合。
+  - depth=2 极慢（100 局 4 workers 跑 46 分钟以上），不实用。
+  - depth=1 的初步结果也未超过 best_1581。
+
+- **Expert Iteration / outcome 加权训练**
+  - 用当前 best_1581 V3-NN-PC 自对弈 500 局（6,845 样本），value label 用最终 outcome。
+  - Policy net val_acc 仅 0.36，value net best val_loss 0.737，严重过拟合。
+  - 200 局 benchmark：V3-NN-PC Elo **1389**，远低于 best_1581。
+  - 结论：500 局 + outcome label 噪声太大，无法提升；扩大数据量或改用 MC value label 可能再试，但当前证据不乐观。
+
+#### 当前状态
+
+- **当前最强配置仍为 V3-NN-PC（175-dim，Elo 1581）**。
+- `output/nn_model.pt` + `output/nn_value_model_mc.pt` 已恢复为 best_1581。
+
 #### 仍开放的长期方向
 
-- 用 DetMCTS / MCTS 替代 ExpectiMax；
-- 尝试 Expert Iteration / outcome 加权训练；
-- 调优 V3-NN-PC 自身配置（max_candidates、depth、margin）；
-- 若继续特征工程，需先解决推理速度问题，并用 V3-NN-PC 自身分布生成数据（当前 175→291 维度鸿沟导致无法直接迭代）。
+- 收集/生成更高质量的训练数据（如人类对局、多 agent 混合对局）；
+- 改进 value label（如用更强 rollout policy 或结合 outcome 与 MC value）；
+- 扩展动作空间（吃、碰、杠、报听决策）；
+- 对手建模与防守推理；
+- 若继续特征工程，需先解决推理速度问题，并找到与 175-dim 模型迭代的路径。
 
 
