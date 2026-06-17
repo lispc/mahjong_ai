@@ -40,6 +40,7 @@ def main():
     lr = float(sys.argv[4]) if len(sys.argv) > 4 else 1e-3
     hidden_dims_str = sys.argv[5] if len(sys.argv) > 5 else '512,256,128'
     hidden_dims = [int(x) for x in hidden_dims_str.split(',')]
+    wd = float(sys.argv[6]) if len(sys.argv) > 6 else 0.0
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'Using device: {device}')
@@ -72,7 +73,7 @@ def main():
     print(f'Train: {n_train}, Val: {n_val}, features: {X.shape[1]}')
 
     model = MahjongValueNetDeep(input_dim=X.shape[1], hidden_dims=hidden_dims).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=wd)
     criterion = nn.MSELoss()
 
     best_val_loss = float('inf')

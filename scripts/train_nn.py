@@ -60,6 +60,7 @@ def main():
     batch_size = int(sys.argv[3]) if len(sys.argv) > 3 else 256
     lr = float(sys.argv[4]) if len(sys.argv) > 4 else 1e-3
     hidden_dim = int(sys.argv[5]) if len(sys.argv) > 5 else 128
+    wd = float(sys.argv[6]) if len(sys.argv) > 6 else 0.0
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'Using device: {device}')
@@ -87,7 +88,7 @@ def main():
     print(f'Train: {n_train}, Val: {n_val}, features: {X.shape[1]}')
 
     model = MahjongNet(input_dim=X.shape[1], hidden_dim=hidden_dim).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=wd)
     criterion_policy = nn.CrossEntropyLoss()
     criterion_value = nn.MSELoss()
 
