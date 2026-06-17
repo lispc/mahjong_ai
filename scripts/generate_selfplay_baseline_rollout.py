@@ -14,12 +14,9 @@ import random
 import numpy as np
 from multiprocessing import Pool
 
-# 使用 fast_eval 作为 MC rollout policy，否则 baseline select 太慢
-os.environ['MJ_FAST_ROLLOUT'] = '1'
-
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from algo.agents.data_collectors import DataCollectorBaseline
+from algo.agents.data_collectors import DataCollectorV3NN
 from driver import engine
 from algo.nn import mc_value
 
@@ -40,7 +37,8 @@ def _outcome_for_agent(agent_name, result):
 
 def _play_and_collect_single(seed, target_seat=0, n_rollouts=1):
     random.seed(seed)
-    agents = [DataCollectorBaseline('Baseline', verbose=False)
+    agents = [DataCollectorV3NN('V3NN', verbose=False,
+                                expectimax_depth=1, max_candidates=5)
               for _ in range(4)]
     random.shuffle(agents)
     for i, a in enumerate(agents):
@@ -48,7 +46,7 @@ def _play_and_collect_single(seed, target_seat=0, n_rollouts=1):
 
     result = engine.play_game(agents, verbose=False, record_time=False)
 
-    target_name = f'Baseline@{target_seat}'
+    target_name = f'V3NN@{target_seat}'
     target_agent = None
     for a in agents:
         if a.name == target_name:
