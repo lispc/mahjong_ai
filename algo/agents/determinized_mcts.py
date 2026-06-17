@@ -49,6 +49,93 @@ def _fast_rollout_select(hand14):
 
 
 # ---------------------------------------------------------------------------
+# NN value cutoff rollout worker
+# ---------------------------------------------------------------------------
+
+
+def _simulate_one_nn_value_cutoff(args):
+    """在一个采样世界里用 NN value 截断评估候选弃牌。
+
+    rollout 跑固定步数后，用 nn_leaf 评估当前玩家手牌价值。
+    """
+    from algo.nn import nn_leaf
+
+    (candidate, current_hand, opp_hands, wall,
+     public_ctx_dict, locked_indices, cutoff_depth) = args
+
+    ctx = context_v3.ContextV3()
+    ctx.used = public_ctx_dict['used'].copy()
+    ctx.all_seen = public_ctx_dict['all_seen'].copy()
+    ctx.discards = {p: list(seq) for p, seq in public_ctx_dict['discards'].items()}
+    ctx.tenpai_players = set(public_ctx_dict['tenpai_players'])
+
+    cur_hand = list(current_hand)
+    cur_hand.remove(candidate)
+    hands = [
+        cur_hand,
+        list(opp_hands[0]),
+        list(opp_hands[1]),
+        list(opp_hands[2]),
+    ]
+    player_names = ['cur@0', 'opp1@1', 'opp2@2', 'opp3@3']
+    wall = list(wall)
+    turn = 1
+    current_idx = 0
+    locked = set(locked_indices)
+
+    # 设置 nn_leaf 全局上下文；子进程各自独立
+    nn_leaf.set_leaf_context(ctx, player_names[current_idx], current_hand)
+
+    step = 0
+    max_steps = cutoff_depth if cutoff_depth > 0 else 10000
+
+    while wall and step < max_steps:
+        drawn = wall.pop(0)
+        hands[turn].append(drawn)
+
+        if eval_v2.is_win(hands[turn]):
+            return 1.0 if turn == current_idx else -0.3
+
+        if turn in locked:
+            discarded = drawn
+            hands[turn].remove(discarded)
+        else:
+            discarded = _fast_rollout_select(hands[turn])
+            hands[turn].remove(discarded)
+
+        for j in range(4):
+            if j == turn:
+                continue
+            if eval_v2.is_win(hands[j] + [discarded]):
+                if j == current_idx:
+                    return 1.0
+                if turn == current_idx:
+                    return -1.0
+                return -0.3
+
+        ctx.see_tile(discarded, player_names[turn])
+
+        if (turn not in locked and len(hands[turn]) == 13 and
+                eval_v2.shanten(hands[turn]) == 0):
+            rem = ctx.remaining_wall(hands[turn])
+            waits = eval_v2.winning_tiles(hands[turn], rem)
+            if sum(rem.get(t, 0) for t in waits) >= 3:
+                locked.add(turn)
+                ctx.declare_tenpai(player_names[turn])
+
+        turn = (turn + 1) % 4
+        step += 1
+
+    # 截断：用 NN leaf 评估当前玩家手牌价值
+    # 注意：当前玩家已经弃掉 candidate，手牌应为 13 张
+    try:
+        value = nn_leaf.nn_leaf_value(list(hands[current_idx]))
+    except Exception:
+        value = 0.0
+    return float(value) / 100.0  # nn_leaf 返回 value = eval0 + 2*NN，范围约 [-100, 100]
+
+
+# ---------------------------------------------------------------------------
 # NN policy rollout worker
 # ---------------------------------------------------------------------------
 
@@ -292,7 +379,9 @@ class DeterminizedMCTSAgent(agent.Agent):
         n_worlds: 每次决策采样的世界数。
         n_rollouts_per_world: 每个世界每个候选的 rollout 次数（默认 1）。
         max_workers: 并行 rollout 的进程数；<=1 则串行。
-        rollout_depth: 0 表示走完该局；>0 表示最多模拟这么多回合后截断（未实现，保留接口）。
+        rollout_depth: 0 表示走完该局；>0 表示最多模拟这么多回合后截断。
+        nn_value_cutoff: 是否用 NN leaf value 截断 rollout（默认 False）。
+        cutoff_depth: NN value 截断的 rollout 深度。
     """
 
     def __init__(self, name, verbose=False,
@@ -302,7 +391,9 @@ class DeterminizedMCTSAgent(agent.Agent):
                  rollout_depth=0,
                  top_k=6,
                  belief_exp_rollout=False,
-                 nn_rollout=False):
+                 nn_rollout=False,
+                 nn_value_cutoff=False,
+                 cutoff_depth=20):
         super().__init__(name, verbose)
         self.n_worlds = n_worlds
         self.n_rollouts_per_world = n_rollouts_per_world
@@ -311,6 +402,8 @@ class DeterminizedMCTSAgent(agent.Agent):
         self.top_k = top_k
         self.belief_exp_rollout = belief_exp_rollout
         self.nn_rollout = nn_rollout
+        self.nn_value_cutoff = nn_value_cutoff
+        self.cutoff_depth = cutoff_depth
         self.context = context_v3.ContextV3()
 
     def init_tiles(self, l):
@@ -393,15 +486,18 @@ class DeterminizedMCTSAgent(agent.Agent):
 
         public_ctx = self._public_context_dict()
 
+        depth_param = self.cutoff_depth if self.nn_value_cutoff else self.rollout_depth
         tasks = []
         for _ in range(self.n_worlds):
             opp_hands, wall = self._sample_world()
             for candidate in candidates:
                 for _ in range(self.n_rollouts_per_world):
                     tasks.append((candidate, list(self.cur), opp_hands, wall,
-                                  public_ctx, [], self.rollout_depth))
+                                  public_ctx, [], depth_param))
 
-        if self.nn_rollout:
+        if self.nn_value_cutoff:
+            sim_fn = _simulate_one_nn_value_cutoff
+        elif self.nn_rollout:
             sim_fn = _simulate_one_nn
         elif self.belief_exp_rollout:
             sim_fn = _simulate_one_belief
