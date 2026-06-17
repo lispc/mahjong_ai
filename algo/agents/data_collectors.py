@@ -6,6 +6,36 @@ from algo.agents.belief_expectimax_v3 import BeliefExpectimaxV3Agent
 from algo.nn.features import extract_features, tile_to_index
 
 
+class DataCollectorBaseline(BeliefExpectimaxV3Agent):
+    """
+    Baseline (eval0 leaf + baseline_eval1 candidate) 策略的数据采集版本。
+    用于首次生成 291 维特征的训练数据，不加载 NN 模型。
+    """
+
+    def __init__(self, name, verbose=False, buffer=None):
+        super().__init__(name, verbose=verbose,
+                         expectimax_depth=1,
+                         max_candidates=5,
+                         leaf_evaluator='eval0',
+                         candidate_policy='baseline_eval1')
+        self.buffer = buffer if buffer is not None else []
+
+    def next(self):
+        assert len(self.cur) == 14
+        features = extract_features(self.context, self.cur, self.name)
+        hand14 = list(self.cur)
+        ctx_snapshot = self.context.copy()
+        disc = super().next()
+        self.buffer.append({
+            'features': features,
+            'action': tile_to_index(disc),
+            'context': ctx_snapshot,
+            'hand': hand14,
+            'name': self.name,
+        })
+        return disc
+
+
 class DataCollectorBeliefExp(BeliefExpectimaxAgent):
     """
     BeliefExp 的数据采集版本。

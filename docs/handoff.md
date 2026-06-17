@@ -116,37 +116,33 @@ PYTHONPATH=. python tmp/benchmark_new_models.py 100 4
 
 结论：**数据量不是当前瓶颈，数据/标签质量和算法结构才是**。已恢复 true best_1581 模型。
 
-### 5.4 当前主攻方向：DetMCTS + 特征工程
+### 5.4 当前主攻方向：特征工程（进行中）
 
-采用两阶段策略：
+DetMCTS + NN value 截断已快速验证：400 局 benchmark Elo 仅 **1315**，远低于当前 best 1580，暂时放弃该路线。
 
-#### 阶段一：DetMCTS + NN value 截断（进行中）
+现在进入**特征工程**阶段：
 
-在 `algo/agents/determinized_mcts.py` 已有 Flat Monte Carlo 基础上，加入 NN value 截断：
+- 已实现 291 维输入（原 175 维）：
+  - 手牌质量：向听数(1) + 有效进张(1) + 待牌分布(34)
+  - 自己的弃牌历史(34)
+  - 壁牌/筋牌安全度(34)
+  - 对手花色偏好(12)
+  - 保留原特征：手牌(34)、剩余牌山(34)、对手弃牌(3×34)、报听 flag(4)、进度(1)
+- 同步修复了 `features.py` 中 `_suit_of_tile` 对项目 tile value 编码（1-9/11-19/21-29/31-37）的错误。
+- 新增 `DataCollectorBaseline`（eval0 leaf + baseline_eval1 candidate），用于在不加载旧 NN 的情况下生成 291 维特征数据。
+- 生成脚本 `scripts/generate_selfplay_baseline_rollout.py` 已设置 `MJ_FAST_ROLLOUT=1`，使用 `algo.eval.fast_eval` 加速 MC rollout。
+- 正在生成 2000 局新特征 baseline rollout 数据：`output/nn_training_data_selfplay_baseline_rollout_2000_v2.npz`（291 维）。
 
-- rollout 不再模拟到牌局结束；
-- 跑固定深度后，用 `nn_leaf` 评估叶子手牌价值；
-- 预期：决策速度提升，若 value net 质量好则强度也提升。
+#### 已验证失败的路线
 
-关键文件：
-- `algo/agents/determinized_mcts.py`：新增 `_simulate_one_nn_value_cutoff`
-- `algo/nn/nn_leaf.py`：已有 batch value 评估
+- **nnpolicy 作为 rollout policy**：Elo 1386，太弱。
+- **单纯扩大 baseline rollout 数据量到 10000 局 + 扩大网络**：Elo 1528/1462，不如 5000 局。
+- **DetMCTS + NN value cutoff**：Elo 1315，暂放弃。
 
-#### 阶段二：特征工程
-
-把当前 175 维输入扩展到 250+ 维：
-
-- 向听数、听牌张数（ukeire）
-- 待牌分布（34 维）
-- dora（34 维）
-- 壁牌 / 筋牌信号（34 维）
-- 对手花色偏好（12 维）
-- 自己的弃牌历史（34 维）
-
-扩展特征后需要重新生成训练数据并训练 NN，再集成到 MCTS。
-
-### 5.5 其他长期方向
+#### 仍开放的长期方向
 
 - 用 DetMCTS / MCTS 替代 ExpectiMax；
 - 尝试 Expert Iteration / outcome 加权训练；
 - 调优 V3-NN-PC 自身配置（max_candidates、depth、margin）。
+
+
