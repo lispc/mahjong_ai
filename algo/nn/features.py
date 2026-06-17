@@ -116,11 +116,12 @@ def _self_discard_array(ctx, self_name):
     return arr
 
 
-def _hand_quality_features(hand14, remaining):
+def _hand_quality_features(hand, remaining):
     """返回手牌质量特征：向听数(1) + ukeire(1) + 待牌分布(34)。"""
-    shanten = eval_v2.shanten(hand14)
-    uke = eval_v2.ukeire(hand14, remaining)
-    waits = eval_v2.winning_tiles(hand14, remaining)
+    hand = list(hand)
+    shanten = eval_v2.shanten(hand)
+    uke = eval_v2.ukeire(hand, remaining)
+    waits = eval_v2.winning_tiles(hand, remaining)
 
     wait_arr = np.zeros(34, dtype=np.float32)
     for t in waits:

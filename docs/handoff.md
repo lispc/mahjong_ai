@@ -116,33 +116,47 @@ PYTHONPATH=. python tmp/benchmark_new_models.py 100 4
 
 结论：**数据量不是当前瓶颈，数据/标签质量和算法结构才是**。已恢复 true best_1581 模型。
 
-### 5.4 当前主攻方向：特征工程（进行中）
+### 5.4 当前主攻方向：特征工程（已验证 2000 局，效果不佳）
 
 DetMCTS + NN value 截断已快速验证：400 局 benchmark Elo 仅 **1315**，远低于当前 best 1580，暂时放弃该路线。
 
-现在进入**特征工程**阶段：
+#### 特征工程第一次尝试（2000 局 baseline rollout + 291 维输入）
 
-- 已实现 291 维输入（原 175 维）：
-  - 手牌质量：向听数(1) + 有效进张(1) + 待牌分布(34)
-  - 自己的弃牌历史(34)
-  - 壁牌/筋牌安全度(34)
-  - 对手花色偏好(12)
-  - 保留原特征：手牌(34)、剩余牌山(34)、对手弃牌(3×34)、报听 flag(4)、进度(1)
-- 同步修复了 `features.py` 中 `_suit_of_tile` 对项目 tile value 编码（1-9/11-19/21-29/31-37）的错误。
-- 新增 `DataCollectorBaseline`（eval0 leaf + baseline_eval1 candidate），用于在不加载旧 NN 的情况下生成 291 维特征数据。
-- 生成脚本 `scripts/generate_selfplay_baseline_rollout.py` 已设置 `MJ_FAST_ROLLOUT=1`，使用 `algo.eval.fast_eval` 加速 MC rollout。
-- 正在生成 2000 局新特征 baseline rollout 数据：`output/nn_training_data_selfplay_baseline_rollout_2000_v2.npz`（291 维）。
+已实现 291 维输入（原 175 维）：
 
-#### 已验证失败的路线
+- 手牌质量：向听数(1) + 有效进张(1) + 待牌分布(34)
+- 自己的弃牌历史(34)
+- 壁牌/筋牌安全度(34)
+- 对手花色偏好(12)
+- 保留原特征：手牌(34)、剩余牌山(34)、对手弃牌(3×34)、报听 flag(4)、进度(1)
 
-- **nnpolicy 作为 rollout policy**：Elo 1386，太弱。
-- **单纯扩大 baseline rollout 数据量到 10000 局 + 扩大网络**：Elo 1528/1462，不如 5000 局。
-- **DetMCTS + NN value cutoff**：Elo 1315，暂放弃。
+同步修复了 `features.py` 中 `_suit_of_tile` 的 tile value 编码错误，并在 `nn_leaf.py` 中补上了 leaf value 推理时缺失的 36 维手牌质量特征。
+
+生成 2000 局（25,315 样本）baseline rollout 数据：
+
+- 使用 `DataCollectorBaseline`（eval0 + baseline_eval1）决策
+- `MJ_FAST_ROLLOUT=1` 加速 MC rollout
+- 输出：`output/nn_training_data_selfplay_baseline_rollout_2000_v2.npz`
+
+训练结果：
+
+- Policy net val_acc 仅 **0.346**，value net best val_loss **0.743**（严重过拟合）
+- 400 局 benchmark：V3-NN-PC Elo **1379**，远低于 best_1581 的 **1581**
+- V3-NN-PC 平均决策时间 **3.36s**（原 best 约 155ms），新 quality 特征显著拖慢 leaf evaluation
+
+可能原因：
+
+1. 数据量不足（25k vs 旧 best 68k），且来自较弱策略（eval0+baseline_eval1），分布与 V3-NN-PC 不匹配。
+2. 手牌质量特征计算昂贵，leaf evaluation 调用 `eval_v2.shanten/ukeire/winning_tiles`，使 expectimax 极慢。
+3. 新增特征（尤其是 suji/safety、opp_suit_pref）可能噪声大于信号。
+
+当前已恢复 `output/nn_model.pt` / `output/nn_value_model_mc.pt` 为 best_1581（175 维）。
 
 #### 仍开放的长期方向
 
 - 用 DetMCTS / MCTS 替代 ExpectiMax；
 - 尝试 Expert Iteration / outcome 加权训练；
-- 调优 V3-NN-PC 自身配置（max_candidates、depth、margin）。
+- 调优 V3-NN-PC 自身配置（max_candidates、depth、margin）；
+- 若继续特征工程，需先解决推理速度问题，并用 V3-NN-PC 自身分布生成数据（当前 175→291 维度鸿沟导致无法直接迭代）。
 
 

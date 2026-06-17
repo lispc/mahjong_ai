@@ -13,7 +13,7 @@ import numpy as np
 import algo
 import context as ctx_module
 
-from algo.nn.features import extract_features, _context_features, _hand_to_array
+from algo.nn.features import extract_features, _context_features, _hand_to_array, _hand_quality_features
 
 
 _EMPTY_CONTEXT = ctx_module.Context()
@@ -119,15 +119,18 @@ def nn_leaf_values_batch(hands):
     if ctx is None or player is None:
         raise RuntimeError('nn_leaf_values_batch called before set_leaf_context')
 
-    # 上下文特征只算一次；叶子之间的差异只有手牌 34 维
+    # 上下文特征只算一次；叶子之间的差异：手牌 34 维 + 手牌质量 36 维
     ctx_arr = _context_features(ctx, _CURRENT_HAND14, player)
 
     n = len(hands)
     hand_matrix = np.zeros((n, 34), dtype=np.float32)
+    quality_matrix = np.zeros((n, 36), dtype=np.float32)
     for i, hand in enumerate(hands):
         hand_matrix[i] = _hand_to_array(hand) / 4.0
+        remaining = ctx.remaining_wall(hand)
+        quality_matrix[i] = _hand_quality_features(hand, remaining)
 
-    X = np.concatenate([hand_matrix, np.tile(ctx_arr, (n, 1))], axis=1)
+    X = np.concatenate([hand_matrix, np.tile(ctx_arr, (n, 1)), quality_matrix], axis=1)
     X_t = torch.tensor(X, dtype=torch.float32)
     if torch.cuda.is_available():
         X_t = X_t.cuda()
