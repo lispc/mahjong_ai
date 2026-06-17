@@ -105,34 +105,48 @@ PYTHONPATH=. python tmp/benchmark_new_models.py 100 4
 - 训练出的 V3-NN-PC 在 400 局 benchmark 中 Elo 仅 **1386**，远低于当前 best **1581**。
 - 结论：NN policy 作为 rollout policy 太弱，value label 质量差，导致模型退化。应继续使用 **baseline (`algo.select`) rollout**。
 
-### 5.3 继续放大 baseline rollout 数据规模（进行中）
+### 5.3 已放弃：单纯放大 baseline rollout 数据规模
 
-已推送一键过夜脚本：
+10000 局 baseline rollout（134,358 样本）已完成，但训练出的 V3-NN-PC Elo 仅 **1528**（默认网络）和 **1462**（扩大网络 + weight decay），均低于当前 best **1580**。
 
-```bash
-bash scripts/overnight_baseline_10000.sh
-```
+关键原因：
+- value net 在 10000 局数据上 val_loss 最低只能到 ~0.78，而 5000 局数据可达 ~0.199
+- 单纯增加样本量没有降低 label 噪声，反而让网络难以拟合
+- 扩大网络（1024 hidden policy + 1024/512/256 value）+ weight decay 也无法解决
 
-它会自动完成：
-1. part0 + part1 baseline rollout（各 64 workers）
-2. part2 + part3 baseline rollout（各 64 workers）
-3. 合并为 `output/nn_training_data_baseline_rollout_10000.npz`
-4. 训练 policy-value net + deep value net
-5. 跑 400 局 4-GPU benchmark 并汇总
+结论：**数据量不是当前瓶颈，数据/标签质量和算法结构才是**。已恢复 true best_1581 模型。
 
-预计总耗时约 **13 小时**。运行前会自动备份当前 best 模型到 `output/best_before_overnight/`。
+### 5.4 当前主攻方向：DetMCTS + 特征工程
 
-如果需要分步手动执行，参考脚本内容即可。
+采用两阶段策略：
 
-### 5.3 单独优化 candidate policy
+#### 阶段一：DetMCTS + NN value 截断（进行中）
 
-本次训练显示 `candidate_policy='nn'` 的 V3-NN-PC 明显强于 `candidate_policy='baseline_eval1'` 的 V3-NN。可以：
+在 `algo/agents/determinized_mcts.py` 已有 Flat Monte Carlo 基础上，加入 NN value 截断：
 
-- 训练一个更强的 NN policy candidate；
-- 或者尝试不同的 candidate 数量（max_candidates=3/5/7）组合。
+- rollout 不再模拟到牌局结束；
+- 跑固定深度后，用 `nn_leaf` 评估叶子手牌价值；
+- 预期：决策速度提升，若 value net 质量好则强度也提升。
 
-### 5.4 其他长期方向
+关键文件：
+- `algo/agents/determinized_mcts.py`：新增 `_simulate_one_nn_value_cutoff`
+- `algo/nn/nn_leaf.py`：已有 batch value 评估
+
+#### 阶段二：特征工程
+
+把当前 175 维输入扩展到 250+ 维：
+
+- 向听数、听牌张数（ukeire）
+- 待牌分布（34 维）
+- dora（34 维）
+- 壁牌 / 筋牌信号（34 维）
+- 对手花色偏好（12 维）
+- 自己的弃牌历史（34 维）
+
+扩展特征后需要重新生成训练数据并训练 NN，再集成到 MCTS。
+
+### 5.5 其他长期方向
 
 - 用 DetMCTS / MCTS 替代 ExpectiMax；
-- 加入更丰富的特征（对手报听、壁牌、筋牌）；
-- 尝试 Expert Iteration / outcome 加权训练。
+- 尝试 Expert Iteration / outcome 加权训练；
+- 调优 V3-NN-PC 自身配置（max_candidates、depth、margin）。

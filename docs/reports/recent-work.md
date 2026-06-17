@@ -154,9 +154,46 @@ V3-NN-PC     0.172    0.040    0.133    0.147      0.035    1581     155.0
 
 ---
 
-## 5. 下一步可选方向
+## 5. 10000 局 baseline rollout 实验结论
 
-1. **等待 10000 局 baseline rollout 过夜结果**：已启动 `scripts/overnight_baseline_10000.sh`，预计 13 小时完成训练 + benchmark；
-2. **继续优化 value net**：residual connection、dropout、更小的学习率；
-3. **加特征**：dora、向听数、ukeire、待牌数等；
-4. **DetMCTS 升级**：用 NN value 截断 rollout、NN policy 做 prior。
+已完成的 overnight 实验：
+
+| 配置 | V3-NN-PC Elo |
+|---|---|
+| 10000 局 + 256 hidden policy / 512-256-128 value | 1528 |
+| 10000 局 + 1024 hidden policy / 1024-512-256 value + weight decay | 1462 |
+| true best_1581（5000 局 baseline） | **1580** |
+
+**结论**：单纯放大 baseline rollout 数据量无法提升性能。10000 局数据的 value label 质量（val_loss ~0.78）明显低于 5000 局（val_loss ~0.199）。已恢复 best_1581。
+
+---
+
+## 6. 下一步：DetMCTS + 特征工程
+
+采用两阶段策略：
+
+### 阶段一：DetMCTS + NN value 截断
+
+在 `algo/agents/determinized_mcts.py` 已有 Flat Monte Carlo 基础上，实现 rollout 的 NN value 截断：
+
+- rollout 不再模拟到牌局结束；
+- 跑固定深度后，用 `nn_leaf` 评估叶子手牌价值；
+- 目标是提升决策速度，同时保持或提升强度。
+
+### 阶段二：特征工程
+
+扩展当前 175 维特征到 250+ 维：
+
+- 向听数、ukeire
+- 待牌分布
+- dora
+- 壁牌 / 筋牌
+- 对手花色偏好
+- 自己的弃牌历史
+
+扩展特征后重新生成训练数据、训练 NN，并集成到 MCTS。
+
+### 其他备选
+
+- 调优 V3-NN-PC 自身配置（max_candidates、depth、margin）；
+- 尝试 Expert Iteration / outcome 加权训练。
