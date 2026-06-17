@@ -44,6 +44,8 @@ V3-NN-PC Elo **1581**，超过 2000 局版本的 1552 约 +29，超过旧 best V
 - `output/nn_model_best_1524.pt` / `output/nn_value_model_mc_best_1524.pt`（旧 best）
 
 > 注意：**candidate_policy='baseline_eval1' 的 V3-NN 持续弱于 candidate_policy='nn' 的 V3-NN-PC**。5000 局中 V3-NN 仅 1455，而 V3-NN-PC 达到 1581。后续默认使用 V3-NN-PC。
+>
+> **项目状态：已结束。** 当前 best_1581 为最终保留模型。
 
 ---
 
