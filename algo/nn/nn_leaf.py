@@ -135,7 +135,18 @@ def nn_leaf_values_batch(hands):
     with torch.no_grad():
         values = model(X_t).cpu().numpy().reshape(-1)
 
+    # Leaf 公式可由 env var 切换：
+    #   MJ_NN_LEAF_MODE=residual (默认): eval0 + MJ_NN_VALUE_COEF * nn_value
+    #   MJ_NN_LEAF_MODE=pure:           MJ_NN_LEAF_SCALE * nn_value (无 eval0)
+    _LEAF_MODE = os.environ.get('MJ_NN_LEAF_MODE', 'residual')
+    _NN_VALUE_COEF = float(os.environ.get('MJ_NN_VALUE_COEF', '2.0'))
+    _NN_LEAF_SCALE = float(os.environ.get('MJ_NN_LEAF_SCALE', '10.0'))
+
     base_values = []
-    for hand in hands:
-        base_values.append(algo.eval0(hand, _EMPTY_CONTEXT) + float(values[len(base_values)]) * 2.0)
+    for i, hand in enumerate(hands):
+        v = float(values[i])
+        if _LEAF_MODE == 'pure':
+            base_values.append(v * _NN_LEAF_SCALE)
+        else:
+            base_values.append(algo.eval0(hand, _EMPTY_CONTEXT) + v * _NN_VALUE_COEF)
     return base_values
