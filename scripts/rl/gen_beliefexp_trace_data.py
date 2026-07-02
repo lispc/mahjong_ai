@@ -24,6 +24,7 @@ import os
 import random
 import numpy as np
 import time
+import threading
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -153,8 +154,23 @@ def _play_one_game(seed):
 
 
 def _thread_worker(args):
-    i, s = args
-    return _play_one_game(s)
+    i, s, completed = args
+    result = _play_one_game(s)
+    if completed is not None:
+        completed.value += 1
+    return result
+
+
+def _progress_reporter(completed, total, interval=30):
+    while True:
+        time.sleep(interval)
+        if completed is None:
+            break
+        n = completed.value
+        if n >= total:
+            break
+        pct = 100.0 * n / total if total > 0 else 0.0
+        print(f'[progress] {n}/{total} games completed ({pct:.1f}%)', flush=True)
 
 
 def main():
@@ -165,19 +181,27 @@ def main():
 
     print(f'BeliefExp trace teacher data: {total_games} games, {workers} workers')
 
-    t0 = time.time()
-    args_list = [(i, seed_base + i) for i in range(total_games)]
-
     import multiprocessing as mp
     mp.set_start_method('spawn', force=True)
+    manager = mp.Manager()
+    completed = manager.Value('i', 0)
+
+    args_list = [(i, seed_base + i, completed) for i in range(total_games)]
+
+    reporter = threading.Thread(target=_progress_reporter, args=(completed, total_games), daemon=True)
+    reporter.start()
+
+    t0 = time.time()
     from concurrent.futures import ProcessPoolExecutor
     with ProcessPoolExecutor(max_workers=workers) as executor:
         results = list(executor.map(_thread_worker, args_list))
 
+    dt = time.time() - t0
+    print(f'Generated {len(results)} game results in {dt:.1f}s')
+
     all_samples = []
     for r in results:
         all_samples.extend(r)
-    dt = time.time() - t0
     print(f'Generated {len(all_samples)} samples from {total_games} games in {dt:.1f}s')
 
     if not all_samples:
