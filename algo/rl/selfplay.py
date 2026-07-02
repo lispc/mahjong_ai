@@ -59,7 +59,9 @@ class PPOActorAgent(BeliefExpectimaxV3Agent):
         feats = extract_features(self.context, self.cur, self.name)
         x = torch.from_numpy(np.asarray(feats, dtype=np.float32)).unsqueeze(0).to(self.device)
         with torch.no_grad():
-            logits, value = self.net(x)
+            out = self.net(x)
+            logits = out[0]
+            value = out[1]
         logits = logits.squeeze(0).detach().cpu().numpy().astype(np.float64)
         value = float(value.detach().cpu().reshape(-1)[0])
 

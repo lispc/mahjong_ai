@@ -259,8 +259,9 @@ def main():
             for start in range(0, N, args.minibatch):
                 mb = idx[start:start + args.minibatch]
                 mb_t = torch.from_numpy(mb).to(device)
-                logits, value = net(feats[mb_t])
-                value = value.squeeze(-1)
+                out = net(feats[mb_t])
+                logits = out[0]
+                value = out[1].squeeze(-1)
                 logp, entropy = masked_logp_entropy(logits, masks[mb_t], actions[mb_t])
                 ratio = torch.exp(logp - old_logp[mb_t])
                 a = adv[mb_t]
