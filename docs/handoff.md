@@ -6,14 +6,14 @@
 
 ## 1. 当前最强配置
 
-经过 search trace distillation 迭代，当前最强实用配置为 **Hybrid-BE8k_t4**：
+经过 search trace distillation 迭代，当前最强实用配置为 **Hybrid-BE8k_t8**：
 
 ```python
-# benchmark token: hybrid:BE8k_t4:output/nn_conv_bc_beliefexp_trace_8000_big_t4.pt:beliefexp
+# benchmark token: hybrid:BE8k_t8:output/nn_conv_bc_beliefexp_trace_8000_big_t8.pt:beliefexp
 # 对应类：algo.agents.hybrid_nn_belief_agent.HybridNNBeliefAgent
 HybridNNBeliefAgent(
-    'Hybrid-BE8k_t4',
-    nn_model_path='output/nn_conv_bc_beliefexp_trace_8000_big_t4.pt',
+    'Hybrid-BE8k_t8',
+    nn_model_path='output/nn_conv_bc_beliefexp_trace_8000_big_t8.pt',
     belief_kind='beliefexp',
     tenpai_threshold=28,
     device='cpu',
@@ -24,26 +24,30 @@ HybridNNBeliefAgent(
 
 ```
 Agent          win      self     ron      deal-in    draw     Elo      avg_ms
-Baseline       0.244    0.062    0.183    0.221      ...      1519     ~300
-Hybrid-Base    0.216    0.052    0.164    0.178      ...      1416     ~100-300(critical)
-Hybrid-BE4k_big 0.256   0.062    0.194    0.179      ...      1498     ~100-300(critical)
-Hybrid-BE8k_t4 0.257    0.063    0.193    0.155      ...      1567     ~100-300(critical)
+Baseline       0.251    0.067    0.183    0.219      ...      1506     ~300
+Hybrid-Base    0.212    0.056    0.157    0.174      ...      1357     ~100-300(critical)
+Hybrid-BE8k_t4 0.254    0.063    0.191    0.172      ...      1520     ~100-300(critical)
+Hybrid-BE8k_t8 0.256    0.063    0.192    0.160      ...      1618     ~100-300(critical)
 ```
 
-**Hybrid-BE8k_t4** Elo **1567**，胜率 25.7%，点炮 15.5%，同时优于 Baseline、Hybrid-Base 和上一代 Hybrid-BE4k_big。
+**Hybrid-BE8k_t8** Elo **1618**，胜率 25.6%，点炮 16.0%，同时优于 Baseline、Hybrid-Base 和 Hybrid-BE8k_t4。
 
 对应模型（PyTorch `.pt`）：
 
-- `output/nn_conv_bc_beliefexp_trace_8000_big_t4.pt` + `output/nn_conv_bc_beliefexp_trace_8000_big_t4_config.json`
+- `output/nn_conv_bc_beliefexp_trace_8000_big_t8.pt` + `output/nn_conv_bc_beliefexp_trace_8000_big_t8_config.json`
   - `TileConvNet`，128 channels / 6 residual blocks / 512 hidden，带 dealin head 与 value head
   - 训练数据：8000 局纯 `BeliefExpectimaxAgent` 搜索轨迹（`output/nn_teacher_beliefexp_trace_8000.npz`，367635 样本）
-  - 蒸馏设置：α=0.5，T=4，β=0.3，λ_dealin=0.5
+  - 蒸馏设置：α=0.5，T=8，β=0.3，λ_dealin=0.5
 
 备份：
 
+- `output/nn_conv_bc_beliefexp_trace_8000_big_t4.pt` / `..._config.json`（上一版本候选）
 - `output/nn_conv_bc_beliefexp_trace_4000_big.pt` / `..._config.json`（上一代候选 Hybrid-BE4k_big）
 - `output/nn_conv_bc_hybrid_2000.pt` / `..._config.json`（上一代稳健候选 Hybrid-Base）
 - `output/nn_conv_bc_dealin_2000_l07.pt` / `..._config.json`（纯前馈首选）
+- `output/nn_model_best_1581.pt` / `output/nn_value_model_mc_best_1581.pt`（历史 V3-NN-PC best）
+
+> **项目状态：仍在压榨中。** 16000 局数据生成与 T=8 最终模型训练正在进行，当前保留 Hybrid-BE8k_t8 为 best。
 
 > **项目状态：仍在压榨中。** 16000 局数据生成与 T=6/T=8 调参正在进行，当前保留 Hybrid-BE8k_t4 为 best。
 
@@ -276,8 +280,8 @@ DetMCTS + NN value 截断已快速验证：400 局 benchmark Elo 仅 **1315**，
 - 继续同方向 bootstrap 已收敛，再提升需更大网络、更强教师或动作空间改造。
 
 **当前候选**（2026-07-05）：
-- **当前最佳（最稳健）**：`hybrid:BE8k_t4:output/nn_conv_bc_beliefexp_trace_8000_big_t4.pt:beliefexp`（2000 局胜率 25.7%，点炮 15.5%，Elo 1567）
-- 上一版本候选：`hybrid:BE4k_big:output/nn_conv_bc_beliefexp_trace_4000_big.pt:beliefexp`
+- **当前最佳（最稳健）**：`hybrid:BE8k_t8:output/nn_conv_bc_beliefexp_trace_8000_big_t8.pt:beliefexp`（2000 局胜率 25.6%，点炮 16.0%，Elo 1618）
+- 上一版本候选：`hybrid:BE8k_t4:output/nn_conv_bc_beliefexp_trace_8000_big_t4.pt:beliefexp`
 - 上一代稳健候选：`hybrid:hybridBase:output/nn_conv_bc_hybrid_2000.pt:beliefexp`
 - 胜率优先的 Hybrid：`hybrid:dealin07:output/nn_conv_bc_dealin_2000_l07.pt:beliefexp`
 - 纯前馈首选：`output/nn_conv_bc_dealin_2000_l07.pt`
