@@ -48,7 +48,7 @@ Hybrid-BE16k_t8 0.258   0.068    0.191    0.163      ...      1581     ~100-300(
 - `output/nn_conv_bc_dealin_2000_l07.pt` / `..._config.json`（纯前馈首选）
 - `output/nn_model_best_1581.pt` / `output/nn_value_model_mc_best_1581.pt`（历史 V3-NN-PC best）
 
-> **项目状态：压榨阶段告一段落。** 16000 局数据 + T=8 取得当前最佳，继续放大收益预计边际递减。
+> **项目状态：数据缩放实验已结束。** 128000 局（8×）纯 BeliefExp 教师 trace 训练了 128/6/512 与 192/8/768 两个模型，val acc 提升到 0.882–0.884，但 1000 局 Elo 1479/1456，未超越 16000 局模型。当前最佳仍为 `Hybrid-BE16k_t8`，继续堆数据在当前框架下已边际递减。
 
 ---
 
@@ -65,6 +65,8 @@ Hybrid-BE16k_t8 0.258   0.068    0.191    0.163      ...      1581     ~100-300(
 | `output/nn_training_data_selfplay_baseline_rollout_5000.npz` | 68529 条 5000 局 baseline rollout MC value 数据 |
 | `output/nn_training_data_selfplay_baseline_rollout_2000.npz` | 25569 条 2000 局 baseline rollout MC value 数据 |
 | `output/nn_training_data_selfplay_baseline_rollout_1000.npz` | 12835 条 1000 局 baseline rollout MC value 数据 |
+| `output/nn_teacher_beliefexp_trace_16000.npz` | 734073 条 16000 局纯 BeliefExp 教师搜索轨迹（当前 best 来源，本地存在） |
+| `output/nn_teacher_beliefexp_trace_128k.npz` | 5885961 条 128000 局纯 BeliefExp 教师搜索轨迹（8× 缩放实验，未超越 16k，本地存在） |
 
 ---
 
