@@ -81,7 +81,8 @@ class TileConvNet(nn.Module):
     """
 
     def __init__(self, input_dim=175, channels=96, n_blocks=4, hidden_dim=256,
-                 n_tile_ch=5, tile_len=34, dealin_head=False, tenpai_head=False):
+                 n_tile_ch=5, tile_len=34, dealin_head=False, tenpai_head=False,
+                 candidate_value_head=False):
         super().__init__()
         self.n_tile = n_tile_ch * tile_len            # 170
         self.n_tile_ch = n_tile_ch
@@ -89,6 +90,7 @@ class TileConvNet(nn.Module):
         self.n_glob = input_dim - self.n_tile         # 5
         self.use_dealin = dealin_head
         self.use_tenpai = tenpai_head
+        self.use_candidate_value = candidate_value_head
         self.hidden_dim = hidden_dim
         self.stem = nn.Conv1d(n_tile_ch, channels, 3, padding=1)
         self.stem_bn = _gn(channels)
@@ -104,6 +106,9 @@ class TileConvNet(nn.Module):
         if self.use_tenpai:
             self.tenpai_fc = nn.Linear(gfeat_dim, hidden_dim // 2)
             self.tenpai_head = nn.Linear(hidden_dim // 2, 1)
+        if self.use_candidate_value:
+            self.cv_conv = nn.Conv1d(channels, 1, 1)
+            self.cv_glob = nn.Linear(gfeat_dim, 34)
         # 输出层零初始化：初始 policy 近均匀、value≈0，避免 tanh 早期饱和崩溃
         for layer in (self.policy_conv, self.policy_glob, self.value_head):
             nn.init.zeros_(layer.weight)
@@ -116,6 +121,11 @@ class TileConvNet(nn.Module):
         if self.use_tenpai:
             nn.init.zeros_(self.tenpai_head.weight)
             nn.init.zeros_(self.tenpai_head.bias)
+        if self.use_candidate_value:
+            nn.init.zeros_(self.cv_conv.weight)
+            nn.init.zeros_(self.cv_conv.bias)
+            nn.init.zeros_(self.cv_glob.weight)
+            nn.init.zeros_(self.cv_glob.bias)
 
     def _trunk(self, x):
         B = x.shape[0]
@@ -131,10 +141,14 @@ class TileConvNet(nn.Module):
         h, gfeat = self._trunk(x)
         policy_logits = self.policy_conv(h).squeeze(1) + self.policy_glob(gfeat)
         value = torch.tanh(self.value_head(torch.relu(self.value_fc(gfeat))))
+        outs = [policy_logits, value]
         if self.use_dealin:
             dealin_logits = self.dealin_conv(h).squeeze(1) + self.dealin_glob(gfeat)
-            return policy_logits, value, dealin_logits
-        return policy_logits, value
+            outs.append(dealin_logits)
+        if self.use_candidate_value:
+            cv_logits = self.cv_conv(h).squeeze(1) + self.cv_glob(gfeat)
+            outs.append(cv_logits)
+        return tuple(outs)
 
     def tenpai_logit(self, x):
         """报听决策头：输入 175 维特征，输出 logit（>0 表示报听）。"""
@@ -155,5 +169,6 @@ def build_model(config):
                            hidden_dim=config.get('hidden_dim', 256),
                            n_tile_ch=config.get('n_tile_ch', 5),
                            dealin_head=config.get('dealin_head', False),
-                           tenpai_head=config.get('tenpai_head', False))
+                           tenpai_head=config.get('tenpai_head', False),
+                           candidate_value_head=config.get('candidate_value_head', False))
     return MahjongNet(input_dim=input_dim, hidden_dim=config.get('hidden_dim', 128))

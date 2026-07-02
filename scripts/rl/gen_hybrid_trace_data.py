@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""用 Hybrid-hybridBase 当教师生成带 critical-trace 的数据。
+"""用 Hybrid 教师生成带 critical-trace 的数据。
 
-4 个座位全是 Hybrid-hybridBase（平时 NN，对手报听/终盘切 BeliefExp）。
+4 个座位全是同一个 Hybrid 教师（平时 NN，对手报听/终盘切 BeliefExp）。
 只在 critical 状态（agent 实际使用 BeliefExp 搜索）记录搜索轨迹；
 非 critical 状态只记录普通 hard label，scores 全 -1e9、has_trace=0。
 
@@ -17,9 +17,9 @@
 用法：
     PYTHONPATH=. python3 scripts/rl/gen_hybrid_trace_data.py \
         output/nn_teacher_hybrid_trace_1000.npz 1000 16 \
-        output/nn_conv_bc_hybrid_2000.pt beliefexp 28 13000000
+        output/nn_conv_bc_hybrid_2000.pt beliefexp 28 13000000 --save-every 250
 
-参数：out_path n_games n_workers nn_model_path belief_kind tenpai_threshold seed_base
+参数：out_path n_games n_workers nn_model_path belief_kind tenpai_threshold seed_base [--save-every N] [--resume]
 """
 
 import sys
@@ -180,59 +180,134 @@ def _progress_reporter(completed, total, interval=30):
         print(f'[progress] {n}/{total} games completed ({pct:.1f}%)', flush=True)
 
 
+def _empty_arrays():
+    return {'X': None, 'y': None, 'scores': None, 'selected_value': None,
+            'has_trace': None, 'dealin': None, 'v': None}
+
+
+def _stack_chunk(chunk):
+    if not chunk:
+        return _empty_arrays()
+    X = np.stack([s[0] for s in chunk])
+    y = np.array([s[1] for s in chunk], dtype=np.int64)
+    S = np.stack([s[2] for s in chunk])
+    SV = np.array([s[3] for s in chunk], dtype=np.float32)
+    HT = np.array([s[4] for s in chunk], dtype=np.float32)
+    D = np.stack([s[5] for s in chunk])
+    v = np.array([s[6] for s in chunk], dtype=np.float32)
+    return {'X': X, 'y': y, 'scores': S, 'selected_value': SV,
+            'has_trace': HT, 'dealin': D, 'v': v}
+
+
+def _merge_arrays(acc, chunk_arrays):
+    for k in acc:
+        a = chunk_arrays.get(k)
+        if a is None:
+            continue
+        if acc[k] is None:
+            acc[k] = a
+        else:
+            acc[k] = np.concatenate([acc[k], a], axis=0)
+    return acc
+
+
+def _save_checkpoint(acc, completed, path):
+    if acc['X'] is None:
+        return
+    save = dict(acc)
+    save['completed'] = np.array(completed, dtype=np.int64)
+    np.savez(path, **save)
+
+
 def main():
-    out_path = sys.argv[1] if len(sys.argv) > 1 else 'output/nn_teacher_hybrid_trace.npz'
-    total_games = int(sys.argv[2]) if len(sys.argv) > 2 else 1000
-    workers = int(sys.argv[3]) if len(sys.argv) > 3 else 8
-    nn_path = sys.argv[4] if len(sys.argv) > 4 else 'output/nn_conv_bc_hybrid_2000.pt'
-    belief_kind = sys.argv[5] if len(sys.argv) > 5 else 'beliefexp'
-    threshold = int(sys.argv[6]) if len(sys.argv) > 6 else 28
-    seed_base = int(sys.argv[7]) if len(sys.argv) > 7 else 0
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('out_path', default='output/nn_teacher_hybrid_trace.npz')
+    parser.add_argument('total_games', type=int, default=1000)
+    parser.add_argument('workers', type=int, default=8)
+    parser.add_argument('nn_path', default='output/nn_conv_bc_hybrid_2000.pt')
+    parser.add_argument('belief_kind', default='beliefexp')
+    parser.add_argument('threshold', type=int, default=28)
+    parser.add_argument('seed_base', type=int, default=0)
+    parser.add_argument('--save-every', type=int, default=250,
+                        help='每完成 N 局保存一次 checkpoint（0 表示不保存）')
+    parser.add_argument('--resume', action='store_true',
+                        help='从 .checkpoint.npz 断点续跑')
+    args = parser.parse_args()
+
+    out_path = args.out_path
+    total_games = args.total_games
+    workers = args.workers
+    nn_path = args.nn_path
+    belief_kind = args.belief_kind
+    threshold = args.threshold
+    seed_base = args.seed_base
+    save_every = args.save_every
+    checkpoint_path = out_path + '.checkpoint.npz'
 
     print(f'Hybrid trace teacher data: {total_games} games, {workers} workers, '
-          f'nn={nn_path}, belief={belief_kind}, threshold={threshold}')
+          f'nn={nn_path}, belief={belief_kind}, threshold={threshold}, '
+          f'save_every={save_every}, resume={args.resume}')
 
     import multiprocessing as mp
     mp.set_start_method('spawn', force=True)
     manager = mp.Manager()
     completed = manager.Value('i', 0)
 
+    acc = _empty_arrays()
+    start_i = 0
+    if args.resume and os.path.exists(checkpoint_path):
+        d = np.load(checkpoint_path)
+        start_i = int(d['completed'])
+        completed.value = start_i
+        for k in acc:
+            if k in d:
+                acc[k] = d[k]
+        print(f'Resumed from checkpoint: {start_i}/{total_games} games already done, '
+              f'{acc["X"].shape[0] if acc["X"] is not None else 0} samples')
+
     args_list = [(i, seed_base + i, nn_path, belief_kind, threshold, completed)
-                 for i in range(total_games)]
+                 for i in range(start_i, total_games)]
 
     reporter = threading.Thread(target=_progress_reporter, args=(completed, total_games), daemon=True)
     reporter.start()
 
     t0 = time.time()
     from concurrent.futures import ProcessPoolExecutor
+    chunk = []
+    processed = start_i
     with ProcessPoolExecutor(max_workers=workers) as executor:
-        results = list(executor.map(_thread_worker, args_list))
+        for result in executor.map(_thread_worker, args_list):
+            chunk.extend(result)
+            processed += 1
+            if save_every > 0 and (processed % save_every == 0 or processed == total_games):
+                chunk_arrays = _stack_chunk(chunk)
+                acc = _merge_arrays(acc, chunk_arrays)
+                _save_checkpoint(acc, processed, checkpoint_path)
+                print(f'[checkpoint] {processed}/{total_games} games, '
+                      f'{acc["X"].shape[0] if acc["X"] is not None else 0} samples', flush=True)
+                chunk = []
 
     dt = time.time() - t0
-    print(f'Generated {len(results)} game results in {dt:.1f}s')
+    if chunk:
+        chunk_arrays = _stack_chunk(chunk)
+        acc = _merge_arrays(acc, chunk_arrays)
 
-    all_samples = []
-    for r in results:
-        all_samples.extend(r)
-    n_trace = sum(1 for s in all_samples if s[4] > 0.5)
-    print(f'Generated {len(all_samples)} samples ({n_trace} with trace) '
-          f'from {total_games} games in {dt:.1f}s')
+    print(f'Generated {total_games - start_i} new game results in {dt:.1f}s')
+    n_trace = int((acc['has_trace'] > 0.5).sum()) if acc['has_trace'] is not None else 0
+    print(f'Total {acc["X"].shape[0] if acc["X"] is not None else 0} samples ({n_trace} with trace) '
+          f'from {total_games} games')
 
-    if not all_samples:
+    if acc['X'] is None:
         print('No samples generated')
         return
 
-    X = np.stack([s[0] for s in all_samples])
-    y = np.array([s[1] for s in all_samples], dtype=np.int64)
-    S = np.stack([s[2] for s in all_samples])
-    SV = np.array([s[3] for s in all_samples], dtype=np.float32)
-    HT = np.array([s[4] for s in all_samples], dtype=np.float32)
-    D = np.stack([s[5] for s in all_samples])
-    v = np.array([s[6] for s in all_samples], dtype=np.float32)
+    np.savez(out_path, **acc)
+    print(f'Saved {out_path}: X={acc["X"].shape}, trace={n_trace}, y={acc["y"].shape}, v={acc["v"].shape}')
 
-    np.savez(out_path, X=X, y=y, scores=S, selected_value=SV, has_trace=HT,
-             dealin=D, v=v)
-    print(f'Saved {out_path}: X={X.shape}, trace={n_trace}, y={y.shape}, v={v.shape}')
+    if os.path.exists(checkpoint_path):
+        os.remove(checkpoint_path)
+        print(f'Removed checkpoint {checkpoint_path}')
 
 
 if __name__ == '__main__':

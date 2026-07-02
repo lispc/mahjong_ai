@@ -42,6 +42,10 @@ class AgentFactory:
             return agent.Agent('Baseline', verbose=False)
         if self.kind == 'beliefexp':
             return BeliefExpectimaxAgent('BeliefExp', verbose=False)
+        if self.kind == 'be-nn':
+            k = int(self.label)
+            return BeliefExpectimaxAgent(f'BE-NN-{k}', verbose=False,
+                                         nn_model_path=self.path, nn_top_k=k, device='cpu')
         if self.kind == 'v3nnpc':
             return BeliefExpectimaxV3Agent('V3-NN-PC', expectimax_depth=1,
                                            max_candidates=5, leaf_evaluator='nn',
@@ -120,7 +124,8 @@ def _make_factory(token):
                          ('v3rlunion', 'V3-RLunion-'), ('v3deep', 'V3d-'),
                          ('adapt', 'Adapt-'), ('mctsconv', 'MCTSconv-'),
                          ('defensive', 'Def-'), ('hybrid', 'Hybrid-'),
-                         ('safetenpai', 'SafeTenpai-'), ('hybridsafe', 'HybridSafe-')):
+                         ('safetenpai', 'SafeTenpai-'), ('hybridsafe', 'HybridSafe-'),
+                         ('be-nn', 'BE-NN-')):
         if token.startswith(kind + ':'):
             _, label, path = token.split(':', 2)
             return AgentFactory(kind, label=label, path=path), f'{prefix}{label}'

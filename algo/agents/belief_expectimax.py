@@ -11,6 +11,7 @@
 这是一个"把不完全信息放进概率分布，再在前向搜索里取期望"的干净实现。
 """
 
+import os
 import agent
 import tile
 import algo
@@ -18,6 +19,35 @@ import context as ctx_module
 import algo.eval.opponent as opponent
 import algo.context.v3 as context_v3
 import algo.eval.v2 as eval_v2
+
+
+_NN_CACHE = {}
+
+
+def _load_policy_net(model_path, device='cpu'):
+    key = (os.path.abspath(model_path), device)
+    if key in _NN_CACHE:
+        return _NN_CACHE[key]
+    import torch
+    import json
+    from algo.nn.model import build_model
+    cfg_path = model_path.replace('.pt', '_config.json')
+    if not os.path.exists(cfg_path):
+        cfg_path = os.path.join(os.path.dirname(model_path), 'nn_model_config.json')
+    if os.path.exists(cfg_path):
+        cfg = json.load(open(cfg_path))
+    else:
+        cfg = {'arch': 'conv', 'input_dim': 175, 'channels': 96, 'n_blocks': 4,
+               'hidden_dim': 256, 'n_tile_ch': 5, 'dealin_head': True}
+    net = build_model(cfg)
+    sd = torch.load(model_path, map_location=device)
+    if isinstance(sd, dict) and 'model_state_dict' in sd:
+        sd = sd['model_state_dict']
+    net.load_state_dict(sd, strict=False)
+    net.eval()
+    net.to(device)
+    _NN_CACHE[key] = net
+    return net
 
 
 class BeliefExpectimaxAgent(agent.Agent):
@@ -33,12 +63,20 @@ class BeliefExpectimaxAgent(agent.Agent):
     def __init__(self, name, verbose=False,
                  max_candidates=8,
                  defense_margin=0.03,
-                 tenpai_min_wait=4):
+                 tenpai_min_wait=4,
+                 nn_model_path=None,
+                 nn_top_k=None,
+                 device='cpu'):
         super().__init__(name, verbose)
         self.max_candidates = max_candidates
         self.defense_margin = defense_margin
         self.tenpai_min_wait = tenpai_min_wait
         self.context = context_v3.ContextV3()
+        self.nn_model_path = nn_model_path
+        self.nn_top_k = nn_top_k
+        self.device = device
+        self._nn_model = None
+        self._nn_extract = None
 
     def init_tiles(self, l):
         super().init_tiles(l)
@@ -78,6 +116,23 @@ class BeliefExpectimaxAgent(agent.Agent):
             if context.all_seen.get(t, 0) > 0 and remaining.get(t, 0) > 0:
                 return True
         return False
+
+    def _nn_top_candidates(self, candidates, k):
+        """用 NN policy 从 unique tiles 里选 top-k 进入 eval2。"""
+        if self._nn_model is None:
+            self._nn_model = _load_policy_net(self.nn_model_path, self.device)
+            from algo.nn.features import extract_features
+            self._nn_extract = extract_features
+        import torch
+        import numpy as np
+        from algo.nn.features import _TILE_TO_IDX
+        x = self._nn_extract(self.context, self.cur, self.name)
+        with torch.no_grad():
+            xt = torch.from_numpy(x).float().unsqueeze(0).to(self.device)
+            logits = self._nn_model(xt)[0].squeeze(0).cpu().numpy()
+        tile_scores = [(float(logits[int(_TILE_TO_IDX[t])]), t) for t in candidates]
+        tile_scores.sort(reverse=True, key=lambda x: x[0])
+        return [t for _, t in tile_scores[:k]]
 
     def _unique_tiles(self, hand):
         seen = set()
@@ -119,13 +174,16 @@ class BeliefExpectimaxAgent(agent.Agent):
         type_ctx = self._legacy_context()
         candidates = self._unique_tiles(self.cur)
 
-        scored = []
-        for disc in candidates:
-            hand13 = self._remove_one(self.cur, disc)
-            score = algo.eval0(hand13, type_ctx)
-            scored.append((score, disc))
-        scored.sort(reverse=True)
-        top = [disc for _, disc in scored[:self.max_candidates]]
+        if self.nn_model_path is not None and self.nn_top_k is not None and self.nn_top_k > 0:
+            top = self._nn_top_candidates(candidates, self.nn_top_k)
+        else:
+            scored = []
+            for disc in candidates:
+                hand13 = self._remove_one(self.cur, disc)
+                score = algo.eval0(hand13, type_ctx)
+                scored.append((score, disc))
+            scored.sort(reverse=True)
+            top = [disc for _, disc in scored[:self.max_candidates]]
 
         evaluated = []
         score_map = {}

@@ -66,16 +66,18 @@ def _permute_batch(xb, yb, db, sb, n2o_t, am_t):
     return xb, yb, db, sb
 
 
-def evaluate(model, X, yp, yv, S, SV, HT, D, device, bs=2048):
+def evaluate(model, X, yp, yv, S, SV, HT, D, device, bs=2048, CV=None):
     model.eval()
     ce = nn.CrossEntropyLoss(reduction='sum')
     mse = nn.MSELoss(reduction='sum')
     bce = nn.BCEWithLogitsLoss(reduction='none')
     tot = X.shape[0]
-    pl = vl = dl = kl = 0.0
+    pl = vl = dl = kl = rl = cvl = 0.0
     correct = 0
     dealin_valid = 0
     trace_tot = 0
+    cv_valid = 0
+    rank_pairs = 0
     with torch.no_grad():
         for s in range(0, tot, bs):
             e = min(s + bs, tot)
@@ -97,6 +99,24 @@ def evaluate(model, X, yp, yv, S, SV, HT, D, device, bs=2048):
                     kl += float(kl_per_sample[trace_mask].sum())
                     trace_tot += int(trace_mask.sum())
 
+                    # pairwise ranking loss
+                    valid = (sb > -1e8) & trace_mask.unsqueeze(1)
+                    diff = logits.unsqueeze(2) - logits.unsqueeze(1)          # [B,34,34]
+                    score_diff = sb.unsqueeze(2) - sb.unsqueeze(1)
+                    pair_mask = valid.unsqueeze(2) & valid.unsqueeze(1) & (score_diff > 1e-6)
+                    if pair_mask.any():
+                        pair_loss = F.softplus(-diff)
+                        rl += float(pair_loss[pair_mask].sum())
+                        rank_pairs += int(pair_mask.sum())
+
+            if model.use_candidate_value and CV is not None:
+                cv_pred = torch.tanh(out[3])
+                cv_target = CV[s:e].to(device)
+                cv_valid_mask = (cv_target.abs() <= 1.0)  # 有效位置 target 在 [-1,1]
+                if cv_valid_mask.any():
+                    cvl += float(F.mse_loss(cv_pred, cv_target, reduction='none')[cv_valid_mask].sum())
+                    cv_valid += int(cv_valid_mask.sum())
+
             if model.use_dealin and D is not None:
                 dealin_logits = out[2]
                 dlbl = D[s:e].to(device)
@@ -111,6 +131,8 @@ def evaluate(model, X, yp, yv, S, SV, HT, D, device, bs=2048):
         'value_mse': vl / tot,
         'acc': correct / tot,
         'kl': kl / max(trace_tot, 1),
+        'rank_loss': rl / max(rank_pairs, 1),
+        'cv_mse': cvl / max(cv_valid, 1),
         'dealin_bce': dl / max(dealin_valid, 1),
     }
     return metrics
@@ -128,7 +150,13 @@ def main():
     parser.add_argument('--beta', type=float, default=0.3,
                         help='dense value MSE 权重')
     parser.add_argument('--tau', type=float, default=10.0,
-                        help='dense value tanh 缩放')
+                        help='dense value / candidate value tanh 缩放')
+    parser.add_argument('--gamma', type=float, default=0.0,
+                        help='pairwise ranking loss 权重（0 表示不启用）')
+    parser.add_argument('--candidate-value-head', action='store_true',
+                        help='启用 34 维候选 value 头，拟合教师所有候选的 expectimax score')
+    parser.add_argument('--lambda_cv', type=float, default=0.0,
+                        help='候选 value MSE 权重')
     parser.add_argument('--lambda_dealin', type=float, default=0.5)
     parser.add_argument('--epochs', type=int, default=40)
     parser.add_argument('--bs', type=int, default=512)
@@ -157,11 +185,20 @@ def main():
     if SV is not None and args.beta > 0:
         SV = torch.tanh(SV / args.tau)
 
+    # 候选 value target：用原始 score / tau 做 tanh，与 selected_value 目标一致
+    if S is not None and args.candidate_value_head:
+        S_raw = S * args.temp
+        CV = torch.tanh(S_raw / args.tau)
+    else:
+        CV = None
+
     n = X.shape[0]
     input_dim = int(X.shape[1])
     print(f'data {args.data}: {n} samples ({n_trace} with trace), dim={input_dim}, '
           f'channels={args.channels}, n_blocks={args.n_blocks}, hidden={args.hidden}, '
           f'alpha={args.alpha}, temp={args.temp}, beta={args.beta}, tau={args.tau}, '
+          f'gamma={args.gamma}, lambda_cv={args.lambda_cv}, '
+          f'candidate_value_head={args.candidate_value_head}, '
           f'lambda_dealin={args.lambda_dealin}')
 
     g = torch.Generator().manual_seed(0)
@@ -170,8 +207,10 @@ def main():
     val_idx, tr_idx = perm[:n_val], perm[n_val:]
     Xtr, yptr, yvtr = X[tr_idx], yp[tr_idx], yv[tr_idx]
     Xval, ypval, yvval = X[val_idx], yp[val_idx], yv[val_idx]
-    Str, SVtr, HTtr = (S[tr_idx], SV[tr_idx], HT[tr_idx]) if S is not None else (None, None, None)
-    Sval, SVval, HTval = (S[val_idx], SV[val_idx], HT[val_idx]) if S is not None else (None, None, None)
+    Str, SVtr, HTtr, CVtr = (S[tr_idx], SV[tr_idx], HT[tr_idx],
+                             CV[tr_idx] if CV is not None else None) if S is not None else (None, None, None, None)
+    Sval, SVval, HTval, CVval = (S[val_idx], SV[val_idx], HT[val_idx],
+                               CV[val_idx] if CV is not None else None) if S is not None else (None, None, None, None)
     Dtr = D[tr_idx] if D is not None else None
     Dval = D[val_idx] if D is not None else None
 
@@ -179,7 +218,8 @@ def main():
     config = {'arch': 'conv', 'input_dim': input_dim, 'channels': args.channels,
               'n_blocks': args.n_blocks, 'hidden_dim': args.hidden, 'n_tile_ch': 5,
               'features': 'base', 'framework': 'pytorch', 'source': 'search_distill',
-              'dealin_head': True}
+              'dealin_head': True,
+              'candidate_value_head': args.candidate_value_head}
     model = build_model(config).to(device)
 
     if args.init and os.path.exists(args.init):
@@ -229,11 +269,14 @@ def main():
             svb = SVtr[idx].to(device) if SVtr is not None else None
             htb = HTtr[idx].to(device) if HTtr is not None else None
             db = Dtr[idx].to(device) if Dtr is not None else None
+            cvb = CVtr[idx].to(device) if CVtr is not None else None
 
             n2o_t, am_t = perm_tensors[_random.randrange(6)]
             xb, yb, db, sb = _permute_batch(xb, yb, db, sb, n2o_t, am_t)
             if htb is not None:
                 htb = htb  # has_trace 是标量，不受花色置换影响
+            if cvb is not None:
+                cvb = cvb[:, n2o_t]
 
             out = model(xb)
             logits, value = out[0], out[1]
@@ -250,11 +293,29 @@ def main():
                     kl_loss = kl_per_sample[trace_mask].mean()
                     loss = loss + args.alpha * kl_loss
 
+            if sb is not None and args.gamma > 0 and htb is not None:
+                trace_mask = (htb > 0.5)
+                if trace_mask.any():
+                    valid = (sb > -1e8) & trace_mask.unsqueeze(1)
+                    diff = logits.unsqueeze(2) - logits.unsqueeze(1)          # [B,34,34]
+                    score_diff = sb.unsqueeze(2) - sb.unsqueeze(1)
+                    pair_mask = valid.unsqueeze(2) & valid.unsqueeze(1) & (score_diff > 1e-6)
+                    if pair_mask.any():
+                        rank_loss = F.softplus(-diff)[pair_mask].mean()
+                        loss = loss + args.gamma * rank_loss
+
             if svb is not None and args.beta > 0 and htb is not None:
                 trace_mask = (htb > 0.5)
                 if trace_mask.any():
                     dense_value_loss = mse(value.squeeze(-1)[trace_mask], svb[trace_mask])
                     loss = loss + args.beta * dense_value_loss
+
+            if model.use_candidate_value and args.lambda_cv > 0 and cvb is not None:
+                cv_pred = torch.tanh(out[3])
+                cv_valid = (cvb.abs() <= 1.0)
+                if cv_valid.any():
+                    cv_loss = F.mse_loss(cv_pred, cvb, reduction='none')[cv_valid].mean()
+                    loss = loss + args.lambda_cv * cv_loss
 
             if model.use_dealin and args.lambda_dealin > 0 and db is not None:
                 valid = (db >= 0)
@@ -264,7 +325,8 @@ def main():
 
             if ep < args.freeze_epochs:
                 for name, p in model.named_parameters():
-                    if 'policy' not in name and 'value' not in name and 'dealin' not in name:
+                    if ('policy' not in name and 'value' not in name and
+                            'dealin' not in name and 'cv' not in name):
                         p.requires_grad = False
             else:
                 for p in model.parameters():
@@ -275,10 +337,11 @@ def main():
             opt.step()
 
         sched.step()
-        metrics = evaluate(model, Xval, ypval, yvval, Sval, SVval, HTval, Dval, device)
+        metrics = evaluate(model, Xval, ypval, yvval, Sval, SVval, HTval, Dval, device, CV=CVval)
         dt = time.time() - t0
         print(f'ep {ep:2d} | acc {metrics["acc"]:.3f} pce {metrics["policy_ce"]:.3f} '
               f'vmse {metrics["value_mse"]:.3f} kl {metrics["kl"]:.3f} '
+              f'rank {metrics["rank_loss"]:.3f} cv {metrics["cv_mse"]:.3f} '
               f'dealin_bce {metrics["dealin_bce"]:.3f} | {dt:.1f}s')
         if metrics['acc'] > best_acc:
             best_acc = metrics['acc']
