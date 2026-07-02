@@ -4,22 +4,22 @@
 
 ## 当前最强配置
 
-截至最新实验，最强实用配置为 **Hybrid-BE8k_t8**：
+截至最新实验，最强实用配置为 **Hybrid-BE16k_t8**：
 
 - **Agent 类型**：`HybridNNBeliefAgent`（NN + BeliefExp 混合）
-- **NN 模型**：`output/nn_conv_bc_beliefexp_trace_8000_big_t8.pt`
+- **NN 模型**：`output/nn_conv_bc_beliefexp_trace_16000_big_t8.pt`
 - **模型架构**：conv-BC Policy-Value Net，128 channels / 6 residual blocks / 512 hidden，带 dealin head 与 value head
-- **训练方式**：search trace distillation，教师为纯 `BeliefExpectimaxAgent`（每步搜索），8000 局数据，soft target 温度 T=8
-- **性能**（2000 局公平 pool）：胜率 **25.6%**、点炮 **16.0%**、Elo **1618**
+- **训练方式**：search trace distillation，教师为纯 `BeliefExpectimaxAgent`（每步搜索），16000 局数据，soft target 温度 T=8
+- **性能**（2000 局公平 pool）：胜率 **25.8%**、点炮 **16.3%**、Elo **1581**
 - **benchmark token**：
   ```
-  hybrid:BE8k_t8:output/nn_conv_bc_beliefexp_trace_8000_big_t8.pt:beliefexp
+  hybrid:BE16k_t8:output/nn_conv_bc_beliefexp_trace_16000_big_t8.pt:beliefexp
   ```
 
 使用示例：
 
 ```bash
-SEATS="baseline,hybrid:BE8k_t8:output/nn_conv_bc_beliefexp_trace_8000_big_t8.pt:beliefexp,hybrid:Base:output/nn_conv_bc_hybrid_2000.pt:beliefexp,hybrid:BE8k_t4:output/nn_conv_bc_beliefexp_trace_8000_big_t4.pt:beliefexp" \
+SEATS="baseline,hybrid:BE16k_t8:output/nn_conv_bc_beliefexp_trace_16000_big_t8.pt:beliefexp,hybrid:BE8k_t8:output/nn_conv_bc_beliefexp_trace_8000_big_t8.pt:beliefexp,hybrid:Base:output/nn_conv_bc_hybrid_2000.pt:beliefexp" \
 PYTHONPATH=. python3 scripts/rl/benchmark_pool.py 1000 32
 ```
 
@@ -144,8 +144,8 @@ pypy3 scripts/tune_weights_cem.py
 | V3-NN | `algo/agents/belief_expectimax_v3.py` | `algo.eval.v3` + `algo.nn` | `baseline_eval1` 候选 + NN leaf |
 | V3-NN-PC | `algo/agents/belief_expectimax_v3.py` | `algo.eval.v3` + `algo.nn` | NN policy 候选 + NN leaf（历史最强） |
 | DeterminizedMCTS | `algo/agents/determinized_mcts.py` | `algo.eval.v2` + rollout | 支持 NN/BeliefExp rollout |
-| **Hybrid-BE8k_t8** | `algo/agents/hybrid_nn_belief_agent.py` | `algo.nn` + `BeliefExpectimaxAgent` | **当前最强**：conv-BC NN 快速决策 + BeliefExp critical 搜索（T=8 蒸馏） |
-| Hybrid-BE8k_t4 | `algo/agents/hybrid_nn_belief_agent.py` | `algo.nn` + `BeliefExpectimaxAgent` | 上一版本最佳候选（T=4 蒸馏） |
+| **Hybrid-BE16k_t8** | `algo/agents/hybrid_nn_belief_agent.py` | `algo.nn` + `BeliefExpectimaxAgent` | **当前最强**：conv-BC NN + BeliefExp critical 搜索（16000局 T=8 蒸馏） |
+| Hybrid-BE8k_t8 | `algo/agents/hybrid_nn_belief_agent.py` | `algo.nn` + `BeliefExpectimaxAgent` | 上一版本最佳候选（8000局 T=8） |
 | Hybrid-Base | `algo/agents/hybrid_nn_belief_agent.py` | `algo.nn` + `BeliefExpectimaxAgent` | 上一代稳健 Hybrid |
 | SafetyAwarePPOAgent | `algo/agents/safety_aware_ppo_agent.py` | `algo.nn` | 实验性 safety-aware 报听（已证伪） |
 
@@ -161,7 +161,8 @@ NN 后端已切换到 **PyTorch**。核心网络为基于 `TileConvNet` 的 conv
 | `nn_conv_bc_hybrid_2000.pt` | `output/nn_conv_bc_hybrid_2000.pt` | Hybrid-Base 的 NN 部分 |
 | `nn_conv_bc_beliefexp_trace_4000_big.pt` | `output/...` | 4000 局 BeliefExp trace + big 网络 |
 | `nn_conv_bc_beliefexp_trace_8000_big_t4.pt` | `output/...` | 上一版本候选：8000 局 + T=4 |
-| `nn_conv_bc_beliefexp_trace_8000_big_t8.pt` | `output/...` | **当前最佳**：8000 局 BeliefExp trace + big 网络 + T=8 |
+| `nn_conv_bc_beliefexp_trace_8000_big_t8.pt` | `output/...` | 上一版本候选：8000 局 + T=8 |
+| `nn_conv_bc_beliefexp_trace_16000_big_t8.pt` | `output/...` | **当前最佳**：16000 局 BeliefExp trace + big 网络 + T=8 |
 
 训练脚本示例：
 

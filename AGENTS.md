@@ -164,8 +164,8 @@ tail -f output/compute_mc_values_pypy_5000_part0.log
 from algo.agents.hybrid_nn_belief_agent import HybridNNBeliefAgent
 
 HybridNNBeliefAgent(
-    'Hybrid-BE8k_t8',
-    nn_model_path='output/nn_conv_bc_beliefexp_trace_8000_big_t8.pt',
+    'Hybrid-BE16k_t8',
+    nn_model_path='output/nn_conv_bc_beliefexp_trace_16000_big_t8.pt',
     belief_kind='beliefexp',
     tenpai_threshold=28,
     device='cpu',
@@ -174,19 +174,20 @@ HybridNNBeliefAgent(
 
 对应 benchmark token：
 ```
-hybrid:BE8k_t8:output/nn_conv_bc_beliefexp_trace_8000_big_t8.pt:beliefexp
+hybrid:BE16k_t8:output/nn_conv_bc_beliefexp_trace_16000_big_t8.pt:beliefexp
 ```
 
 对应模型（PyTorch `.pt`）：
-- `output/nn_conv_bc_beliefexp_trace_8000_big_t8.pt` + `output/nn_conv_bc_beliefexp_trace_8000_big_t8_config.json`
+- `output/nn_conv_bc_beliefexp_trace_16000_big_t8.pt` + `output/nn_conv_bc_beliefexp_trace_16000_big_t8_config.json`
   - `TileConvNet`，128 channels / 6 residual blocks / 512 hidden，带 dealin head 与 value head
-  - 训练数据：8000 局纯 `BeliefExpectimaxAgent` 搜索轨迹（367635 样本）
+  - 训练数据：16000 局纯 `BeliefExpectimaxAgent` 搜索轨迹（734073 样本）
   - 蒸馏设置：α=0.5，T=8，β=0.3，λ_dealin=0.5
 
-当前 best **Hybrid-BE8k_t8** 在 2000 局公平 pool 中胜率 **25.6%**、点炮 **16.0%**、Elo **1618**，详见 `docs/handoff.md` 与 `docs/designs/conv-bc-roadmap.md`。
+当前 best **Hybrid-BE16k_t8** 在 2000 局公平 pool 中胜率 **25.8%**、点炮 **16.3%**、Elo **1581**，详见 `docs/handoff.md` 与 `docs/designs/conv-bc-roadmap.md`。
 
 备份：
-- `output/nn_conv_bc_beliefexp_trace_8000_big_t4.pt` / `..._config.json`（上一版本候选）
+- `output/nn_conv_bc_beliefexp_trace_8000_big_t8.pt` / `..._config.json`（上一版本候选）
+- `output/nn_conv_bc_beliefexp_trace_8000_big_t4.pt` / `..._config.json`（再上一版本候选）
 - `output/nn_conv_bc_beliefexp_trace_4000_big.pt` / `..._config.json`（上一代候选 Hybrid-BE4k_big）
 - `output/nn_conv_bc_hybrid_2000.pt` / `..._config.json`（上一代稳健候选 Hybrid-Base）
 - `output/nn_conv_bc_dealin_2000_l07.pt` / `..._config.json`（纯前馈首选）
