@@ -32,9 +32,26 @@ def _load_model():
         return _MODEL, _CONFIG
 
     import torch
-    from algo.nn.model import MahjongNet
+    from algo.nn.model import MahjongNet, build_model
     from algo.nn.value_model import MahjongValueNet, MahjongValueNetDeep
     out_dir = 'output'
+
+    # 0) 环境变量指定的 policy-value 网络（如 conv-BC），用其 value head 当 leaf
+    #    MJ_NN_VALUE_MODEL=path.pt [MJ_NN_VALUE_CONFIG=path.json]
+    env_model = os.environ.get('MJ_NN_VALUE_MODEL')
+    if env_model:
+        cfg_path = os.environ.get('MJ_NN_VALUE_CONFIG') or env_model.replace('.pt', '_config.json')
+        with open(cfg_path, 'r') as f:
+            _CONFIG = json.load(f)
+        _MODEL = build_model(_CONFIG)
+        sd = torch.load(env_model, map_location='cpu')
+        if isinstance(sd, dict) and 'model_state_dict' in sd:
+            sd = sd['model_state_dict']
+        _MODEL.load_state_dict(sd)
+        _MODEL.eval()
+        if torch.cuda.is_available():
+            _MODEL = _MODEL.cuda()
+        return _MODEL, _CONFIG
 
     # 1) 优先使用 MC rollout 训练出的深度价值网络
     mc_config_path = os.path.join(out_dir, 'nn_value_model_mc_config.json')
@@ -133,7 +150,11 @@ def nn_leaf_values_batch(hands):
         X_t = X_t.cuda()
 
     with torch.no_grad():
-        values = model(X_t).cpu().numpy().reshape(-1)
+        out = model(X_t)
+        # policy-value 网络返回 (logits, value)；value-only 网络返回标量张量
+        if isinstance(out, (tuple, list)):
+            out = out[1]
+        values = out.cpu().numpy().reshape(-1)
 
     # Leaf 公式可由 env var 切换：
     #   MJ_NN_LEAF_MODE=residual (默认): eval0 + MJ_NN_VALUE_COEF * nn_value

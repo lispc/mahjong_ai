@@ -104,13 +104,21 @@ class BeliefExpectimaxAgent(agent.Agent):
                 return True
         return False
 
-    def next(self):
+    def next_with_trace(self):
+        """返回 (chosen_tile, trace)。
+
+        trace = {
+            'candidates': list of tile values in top_k,
+            'scores': dict tile_value -> offense score (eval2 value),
+            'dangers': dict tile_value -> danger,
+            'selected_value': offense score of chosen tile,
+        }
+        """
         assert len(self.cur) == 14
 
         type_ctx = self._legacy_context()
         candidates = self._unique_tiles(self.cur)
 
-        # 1) 用 eval0 快速预选 top 候选。
         scored = []
         for disc in candidates:
             hand13 = self._remove_one(self.cur, disc)
@@ -119,17 +127,19 @@ class BeliefExpectimaxAgent(agent.Agent):
         scored.sort(reverse=True)
         top = [disc for _, disc in scored[:self.max_candidates]]
 
-        # 2) 对 top 候选用 eval2 精确评估进攻价值。
         evaluated = []
+        score_map = {}
+        danger_map = {}
         for disc in top:
             hand13 = self._remove_one(self.cur, disc)
             offense = algo.eval2(hand13, type_ctx)
             danger = opponent.tile_danger(disc, self.context, self.name)
             evaluated.append((offense, danger, disc))
+            score_map[disc] = float(offense)
+            danger_map[disc] = float(danger)
 
         best_offense = max(item[0] for item in evaluated)
 
-        # 3) 安全 tie-breaking：只在有危险信号时，在 best_offense 附近选危险最低的。
         if self._danger_signal():
             margin = self.defense_margin + 0.02 * len(
                 self.context.tenpai_players - {self.name})
@@ -139,12 +149,21 @@ class BeliefExpectimaxAgent(agent.Agent):
             safe_candidates.sort(key=lambda x: x[1])
             result = safe_candidates[0][2]
         else:
-            # 无危险信号：直接选进攻分最高者。
             evaluated.sort(reverse=True, key=lambda x: x[0])
             result = evaluated[0][2]
+
+        trace = {
+            'candidates': list(top),
+            'scores': score_map,
+            'dangers': danger_map,
+            'selected_value': float(score_map.get(result, best_offense)),
+        }
 
         self.cur.remove(result)
         self.context.see_tile(result, self.name)
         if self.verbose:
             print('出牌:' + tile.tile_to_str(result))
-        return result
+        return result, trace
+
+    def next(self):
+        return self.next_with_trace()[0]

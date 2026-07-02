@@ -2,6 +2,29 @@
 
 本项目是一个用于研究和 benchmark 晋北麻将 AI 的 Python 代码库。核心围绕**带概率修正的 ExpectiMax / MCTS 决策**展开，支持多进程对战、Elo 评分和历史实验报告。
 
+## 当前最强配置
+
+截至最新实验，最强实用配置为 **Hybrid-BE8k_t4**：
+
+- **Agent 类型**：`HybridNNBeliefAgent`（NN + BeliefExp 混合）
+- **NN 模型**：`output/nn_conv_bc_beliefexp_trace_8000_big_t4.pt`
+- **模型架构**：conv-BC Policy-Value Net，128 channels / 6 residual blocks / 512 hidden，带 dealin head 与 value head
+- **训练方式**：search trace distillation，教师为纯 `BeliefExpectimaxAgent`（每步搜索），8000 局数据，soft target 温度 T=4
+- **性能**（2000 局公平 pool）：胜率 **25.7%**、点炮 **15.5%**、Elo **1567**
+- **benchmark token**：
+  ```
+  hybrid:BE8k_t4:output/nn_conv_bc_beliefexp_trace_8000_big_t4.pt:beliefexp
+  ```
+
+使用示例：
+
+```bash
+SEATS="baseline,hybrid:BE8k_t4:output/nn_conv_bc_beliefexp_trace_8000_big_t4.pt:beliefexp,hybrid:Base:output/nn_conv_bc_hybrid_2000.pt:beliefexp,hybrid:BE4k_big:output/nn_conv_bc_beliefexp_trace_4000_big.pt:beliefexp" \
+PYTHONPATH=. python3 scripts/rl/benchmark_pool.py 1000 32
+```
+
+详细实验记录与路线图见 [`docs/designs/conv-bc-roadmap.md`](docs/designs/conv-bc-roadmap.md)。
+
 ## 目录结构
 
 ```
@@ -111,7 +134,7 @@ pypy3 scripts/tune_weights_cem.py
 | Agent | 文件 | 评估后端 | 特点 |
 |---|---|---|---|
 | Baseline | `agent.py` | `algo.eval.legacy` | 原作者基线，2-ply ExpectiMax |
-| Eval2Ctx | `algo/agents/expectimax_eval2.py` | `algo.eval.legacy` | 带入已见牌信息，支持报听，当前最强 |
+| Eval2Ctx | `algo/agents/expectimax_eval2.py` | `algo.eval.legacy` | 带入已见牌信息，支持报听 |
 | ExpectiMaxAgent | `algo/agents/expectimax.py` | `algo.eval.v2` | shanten + taatsu，支持 depth≥2 剪枝 |
 | ExpectiMaxV3Agent | `algo/agents/expectimax_v3.py` | `algo.eval.v3` | ukeire + wait + 防守 |
 | ExpectiMaxBaselineAgent | `algo/agents/expectimax_baseline.py` | `algo.eval.legacy` + `v3` 防守 | eval2 + 基础防守 |
@@ -119,35 +142,57 @@ pypy3 scripts/tune_weights_cem.py
 | MCTSEval2Agent | `algo/agents/mcts_eval2.py` | `algo.eval.legacy` | MCTS + eval2 叶子评估 |
 | Eval2Ctx+BD | `algo/agents/expectimax_eval2.py` | `algo.eval.legacy` + `opponent` | 实验性对手建模防守 |
 | V3-NN | `algo/agents/belief_expectimax_v3.py` | `algo.eval.v3` + `algo.nn` | `baseline_eval1` 候选 + NN leaf |
-| **V3-NN-PC** | `algo/agents/belief_expectimax_v3.py` | `algo.eval.v3` + `algo.nn` | NN policy 候选 + NN leaf（当前最强） |
+| V3-NN-PC | `algo/agents/belief_expectimax_v3.py` | `algo.eval.v3` + `algo.nn` | NN policy 候选 + NN leaf（历史最强） |
 | DeterminizedMCTS | `algo/agents/determinized_mcts.py` | `algo.eval.v2` + rollout | 支持 NN/BeliefExp rollout |
+| **Hybrid-BE8k_t4** | `algo/agents/hybrid_nn_belief_agent.py` | `algo.nn` + `BeliefExpectimaxAgent` | **当前最强**：conv-BC NN 快速决策 + BeliefExp critical 搜索 |
+| Hybrid-Base | `algo/agents/hybrid_nn_belief_agent.py` | `algo.nn` + `BeliefExpectimaxAgent` | 上一代稳健 Hybrid |
+| SafetyAwarePPOAgent | `algo/agents/safety_aware_ppo_agent.py` | `algo.nn` | 实验性 safety-aware 报听（已证伪） |
 
 ## NN Agent 与自对弈
 
-最近引入了基于 MLX 的 Policy-Value Net 与 Deep Value Net，以及“自对弈 + 模型筛选门”循环。
+NN 后端已切换到 **PyTorch**。核心网络为基于 `TileConvNet` 的 conv-BC Policy-Value Net（支持 dealin head、value head、tenpai head），用于 Hybrid agent 的快速 NN 决策。
 
-训练脚本：
+当前主要模型：
+
+| 模型 | 文件 | 说明 |
+|---|---|---|
+| `nn_conv_bc.pt` | `output/nn_conv_bc.pt` | 早期纯行为克隆 baseline |
+| `nn_conv_bc_hybrid_2000.pt` | `output/nn_conv_bc_hybrid_2000.pt` | Hybrid-Base 的 NN 部分 |
+| `nn_conv_bc_beliefexp_trace_4000_big.pt` | `output/...` | 4000 局 BeliefExp trace + big 网络 |
+| `nn_conv_bc_beliefexp_trace_8000_big_t4.pt` | `output/...` | **当前最佳**：8000 局 BeliefExp trace + big 网络 + T=4 |
+
+训练脚本示例：
 
 ```bash
-# Policy-Value Net（支持 hidden_dim 参数）
-python scripts/train_nn.py output/nn_training_data_merged.npz 60 256 0.001 256
+# 普通 conv-BC（可指定 hidden、channels、n_blocks）
+PYTHONPATH=. python3 scripts/train_nn.py output/nn_training_data_merged.npz 60 256 0.001 256
 
-# Deep Value Net（支持 hidden_dims 参数，逗号分隔）
-python scripts/train_value_net_mc.py output/nn_training_data_merged.npz 60 256 0.001 512,256,128
+# Search trace distillation（支持 --init、--alpha、--temp、--channels、--n_blocks、--hidden）
+PYTHONPATH=. python3 scripts/rl/train_search_distill.py \
+    output/nn_teacher_beliefexp_trace_8000.npz \
+    nn_conv_bc_beliefexp_trace_8000_big_t4 \
+    --init output/nn_conv_bc_dealin_2000_l07.pt \
+    --alpha 0.5 --temp 4.0 --beta 0.3 --lambda_dealin 0.5 \
+    --epochs 40 --bs 512 --lr 1e-3 \
+    --channels 128 --n_blocks 6 --hidden 512
+
+# 生成 BeliefExp 教师 trace 数据
+PYTHONPATH=. python3 scripts/rl/gen_beliefexp_trace_data.py \
+    output/nn_teacher_beliefexp_trace_8000.npz 8000 32 19000000
 ```
 
-自对弈 + 筛选门：
+benchmark token 规则见 `scripts/rl/benchmark_pool.py`，例如：
 
-```bash
-# 1000 局、6 worker、每个样本 4 次 MC rollout、100 局评估、Elo 门限 20
-python scripts/self_play_loop.py 1000 6 4 1 100 20
+```
+hybrid:BE8k_t4:output/nn_conv_bc_beliefexp_trace_8000_big_t4.pt:beliefexp
 ```
 
-详细介绍与实验结论见 [`docs/reports/recent-work.md`](docs/reports/recent-work.md)。
+详细介绍与实验结论见 [`docs/designs/conv-bc-roadmap.md`](docs/designs/conv-bc-roadmap.md)。
 
 ## 实验报告索引
 
-- [`docs/reports/recent-work.md`](docs/reports/recent-work.md)：V3-NN-BE1 算法详解、网络训练、自对弈循环、MC rollout 标签质量分析（**最新**）。
+- [`docs/designs/conv-bc-roadmap.md`](docs/designs/conv-bc-roadmap.md)：conv-BC / Hybrid / Search trace distillation 实验路线图与最新结果（**当前最佳 Hybrid-BE8k_t4 来源**）。
+- [`docs/reports/recent-work.md`](docs/reports/recent-work.md)：V3-NN-BE1 算法详解、网络训练、自对弈循环、MC rollout 标签质量分析。
 - [`docs/reports/mcts-eval2-report.md`](docs/reports/mcts-eval2-report.md)：Eval2Ctx 超越 Baseline、MCTS-Eval2 失败、B+D 对手建模、去掉 deepcopy 加速。
 - [`docs/expectimax-todos.md`](docs/expectimax-todos.md)：ExpectiMax 潜在改进清单。
 - [`docs/reports/route-a-report.md`](docs/reports/route-a-report.md)：路线 A 实验记录。

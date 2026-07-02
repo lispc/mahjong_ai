@@ -87,5 +87,93 @@ def extract_features(agent_context, hand14, self_name):
     return np.concatenate([hand_arr, ctx_arr])
 
 
+def extract_features_oracle(agent_context, hand14, self_name, all_hands, wall):
+    """311 维 Oracle 特征 = 175 基础 + 3 对手当前手牌(102) + 完整牌山剩余(34)。
+
+    all_hands: {player_name: hand13/14 list}，包含自己和对手；
+    wall: list，牌山剩余牌（按摸牌顺序，只用集合计数）。
+    """
+    base = extract_features(agent_context, hand14, self_name)  # 175
+    ctx = agent_context
+
+    # 对手手牌（按座位顺序，排除自己）
+    self_seat = _seat(self_name)
+    seat_to_player = {}
+    for p in ctx.discards:
+        seat_to_player.setdefault(_seat(p), p)
+    # 自己也可能在 all_hands 中，按座位补齐
+    for p, h in all_hands.items():
+        seat_to_player.setdefault(_seat(p), p)
+
+    opp_hand_arrs = []
+    for s in range(4):
+        if s == self_seat:
+            continue
+        p = seat_to_player.get(s)
+        hand = all_hands.get(p, [])
+        opp_hand_arrs.append(_hand_to_array(hand) / 4.0)
+
+    # 完整牌山剩余
+    wall_arr = np.zeros(34, dtype=np.float32)
+    for t in wall:
+        wall_arr[int(_TILE_TO_IDX[t])] += 1.0
+    wall_arr = wall_arr / 4.0
+
+    return np.concatenate([base] + opp_hand_arrs + [wall_arr]).astype(np.float32)
+
+
 def tile_to_index(tile_value):
     return int(_TILE_TO_IDX[tile_value])
+
+
+# ---------------------------------------------------------------------------
+# 扩展特征（ext, 212 维）：在 175 基础上加入 BeliefExp 用的「危险度/防守」信息，
+# 让网络能"看见"打出每张牌的点炮风险。布局保持「先牌通道后标量」以适配 conv：
+#   tile channels (6 * 34 = 204): 手牌 / 牌山剩余 / 3 对手弃牌 / 危险度地图
+#   scalars (8): 自家报听 + 3 对手报听 + 进度 + 3 对手危险等级
+# ---------------------------------------------------------------------------
+import algo.eval.opponent as _opp
+
+
+def _aggregate_danger(ctx, self_name, tile_value):
+    """按 per-player 危险度加权聚合（与 BeliefExpV3._aggregate_danger 同构）。"""
+    total = 0.0
+    wsum = 0.0
+    for player in ctx.discards:
+        if player == self_name:
+            continue
+        d = _opp.tile_danger_for_player(tile_value, player, ctx)
+        lvl = _opp.player_danger_level(ctx.discards.get(player, []))
+        w = 1.0 + 0.5 * lvl
+        total += d * w
+        wsum += w
+    return total / wsum if wsum > 0 else 0.0
+
+
+def extract_features_ext(agent_context, hand14, self_name):
+    """212 维扩展特征 = 175 基础重排 + 34 维危险度通道 + 3 维对手危险等级。"""
+    base = extract_features(agent_context, hand14, self_name)   # 175
+    tile_part = base[:170]          # 手牌+牌山+3对手弃牌（5*34）
+    scalars = base[170:175]         # 报听4 + 进度1
+
+    ctx = agent_context
+    danger = np.zeros(34, dtype=np.float32)
+    for idx in range(34):
+        t = int(_IDX_TO_TILE[idx])
+        danger[idx] = _aggregate_danger(ctx, self_name, t)
+    danger = np.clip(danger / 2.0, 0.0, 1.0)
+
+    self_seat = _seat(self_name)
+    seat_to_player = {}
+    for p in ctx.discards:
+        seat_to_player.setdefault(_seat(p), p)
+    dl = []
+    for s in range(4):
+        if s == self_seat:
+            continue
+        p = seat_to_player.get(s)
+        lvl = _opp.player_danger_level(ctx.discards.get(p, [])) if p else 0
+        dl.append(lvl / 2.0)
+    dl = np.array((dl + [0.0, 0.0, 0.0])[:3], dtype=np.float32)
+
+    return np.concatenate([tile_part, danger, scalars, dl]).astype(np.float32)

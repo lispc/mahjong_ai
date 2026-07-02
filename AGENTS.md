@@ -20,6 +20,11 @@
 
 ### 2.1 推荐环境
 
+> **⚠️ 2026-07 换机更新**：当前机器上旧 conda 环境 `mahjong`/`pypy39` **已不存在**。
+> 但 **base 环境（Python 3.13）即自带 torch 2.12+cu126 + CUDA + 4×RTX3090**，
+> 直接 `PYTHONPATH=. python3 ...` 即可跑测试 / 训练 / benchmark，无需重建 env。
+> 下面 `mahjong`/`pypy39` 的说明为历史参考；如需 PyPy 加速 legacy MC 管线才需重建。
+
 - **conda**: `/home/scroll/miniforge3`
 - **主环境名**: `mahjong`（Python 3.10，PyTorch CUDA）
 - **PyPy 环境名**: `pypy39`（Python 3.9 + PyPy 7.3.15，用于 MC value 计算）
@@ -156,26 +161,35 @@ tail -f output/compute_mc_values_pypy_5000_part0.log
 ## 4. 当前最强配置
 
 ```python
-BeliefExpectimaxV3Agent(
-    'V3-NN-PC',
-    expectimax_depth=1,
-    max_candidates=5,
-    leaf_evaluator='nn',
-    candidate_policy='nn',
-    verbose=False,
+from algo.agents.hybrid_nn_belief_agent import HybridNNBeliefAgent
+
+HybridNNBeliefAgent(
+    'Hybrid-BE8k_t4',
+    nn_model_path='output/nn_conv_bc_beliefexp_trace_8000_big_t4.pt',
+    belief_kind='beliefexp',
+    tenpai_threshold=28,
+    device='cpu',
 )
 ```
 
+对应 benchmark token：
+```
+hybrid:BE8k_t4:output/nn_conv_bc_beliefexp_trace_8000_big_t4.pt:beliefexp
+```
+
 对应模型（PyTorch `.pt`）：
-- `output/nn_model.pt` + `output/nn_model_config.json`
-- `output/nn_value_model_mc.pt` + `output/nn_value_model_mc_config.json`
+- `output/nn_conv_bc_beliefexp_trace_8000_big_t4.pt` + `output/nn_conv_bc_beliefexp_trace_8000_big_t4_config.json`
+  - `TileConvNet`，128 channels / 6 residual blocks / 512 hidden，带 dealin head 与 value head
+  - 训练数据：8000 局纯 `BeliefExpectimaxAgent` 搜索轨迹（367635 样本）
+  - 蒸馏设置：α=0.5，T=4，β=0.3，λ_dealin=0.5
+
+当前 best **Hybrid-BE8k_t4** 在 2000 局公平 pool 中胜率 **25.7%**、点炮 **15.5%**、Elo **1567**，详见 `docs/handoff.md` 与 `docs/designs/conv-bc-roadmap.md`。
 
 备份：
-- `output/nn_model_best_1581.pt` / `output/nn_value_model_mc_best_1581.pt`
-- `output/nn_model_best_1552.pt` / `output/nn_value_model_mc_best_1552.pt`
-- `output/nn_model_best_1524.pt` / `output/nn_value_model_mc_best_1524.pt`（旧 best）
-
-当前 best V3-NN-PC Elo **1581**（5000 局 baseline rollout 训练），详见 `docs/handoff.md`。
+- `output/nn_conv_bc_beliefexp_trace_4000_big.pt` / `..._config.json`（上一代候选 Hybrid-BE4k_big）
+- `output/nn_conv_bc_hybrid_2000.pt` / `..._config.json`（上一代稳健候选 Hybrid-Base）
+- `output/nn_conv_bc_dealin_2000_l07.pt` / `..._config.json`（纯前馈首选）
+- `output/nn_model_best_1581.pt` / `output/nn_value_model_mc_best_1581.pt`（历史 V3-NN-PC best）
 
 ---
 
@@ -302,3 +316,42 @@ bash scripts/benchmark_4gpu.sh 400 4
 
 7. **用户说“可以”不等于授权所有后续操作**  
    用户同意某个方向后，具体执行步骤中若涉及破坏已有成果，仍需单独确认。
+
+---
+
+## 10. PPO 端到端 RL 管线（2026-07 新增，方案 B）
+
+> 详见 `docs/reports/rl-ppo-report.md` 与 `docs/handoff.md §6`。
+
+**代码位置**：
+
+| 文件 | 职责 |
+|---|---|
+| `algo/rl/selfplay.py` | `PPOActorAgent`（NN policy 采样 + 轨迹记录，复用 ContextV3）+ 对局 runner + 对手池 + 多进程收集 |
+| `algo/rl/reward.py` | 终局 result → 每座位标量奖励（win/deal_in/other_loss/draw 可配） |
+| `algo/rl/ppo.py` | GAE(λ) + 轨迹展平（γ=1，终局稀疏奖励） |
+| `scripts/rl/train_ppo.py` | PPO 训练主脚本（warm-start/`--init`、`--n-opponents/--opponents`、`--draw-reward`、熵退火、每 iter checkpoint） |
+| `algo/agents/ppo_agent.py` | 加载 PPO 权重的对战 agent（合法 argmax，~1 ms/步，兼容 tournament） |
+| `scripts/rl/benchmark_pool.py` | 任意 4 agent 同一 pool 比 Elo（避免跨 run 漂移）；`benchmark_rl.py`、`sanity_selfplay.py` |
+
+**常用命令**（base 环境，`PYTHONPATH=. python3`）：
+```bash
+# 训练（自对弈 + 引分惩罚）
+python3 scripts/rl/train_ppo.py --iters 80 --games-per-iter 512 --workers 32 \
+    --device cuda:0 --draw-reward -0.4 --ent-coef 0.008 --ent-coef-final 0.001 --tag nn_rl_ppo_C
+# 同一 pool 严谨 benchmark
+SEATS="ppo:C:output/nn_rl_ppo_C.pt,beliefexp,baseline,v3nnpc" \
+    python3 scripts/rl/benchmark_pool.py 400 40
+```
+
+**关键教训**：
+1. **纯自对弈会坍缩到消极引分均衡**（draw=0 ≻ loss=−1）；引分惩罚 + 熵退火才能解锁学习。
+2. **vs frozen 自对弈胜率 ≠ 真实强度**；只有固定强对手 benchmark 才算数（且要同一 pool，Elo 会跨 run 漂移）。
+3. **让弱学习者直接打强敌（每局 2 家 Baseline/BeliefExp）适得其反**（几乎全负、梯度失效、退化）。
+4. **纯前馈 PPO policy 仍弱于搜索型 agent**（胜率 ~10% vs BeliefExp 47%）；报酬整形的真实收益是「更守」（点炮 18%→15%）。
+5. 产物一律写 `output/nn_rl_ppo_*`，**从不覆盖 `nn_model.pt` / `nn_value_model_mc.pt` / 任何 best**。
+6. **RL+搜索融合（已试）**：把 PPO policy 当 V3 的候选生成器——纯 PPO 候选变差（会漏搜索最优弃牌）；PPO∪nn_model 并集只比「同候选数纯 nn」高 ~1.5%（噪声内），增益基本源于「候选更多」而非 RL。未对 V3-NN-PC 稳健提升。用 `scripts/rl/benchmark_pool.py` 的 `v3rlcand:`/`v3rlunion:`/`v3nnpck:` token 复现。
+7. **大杠杆（卷积 + BC）= 当前最强 NN 策略**：`TileConvNet`（1D-Conv/ResNet over 34 牌轴 + GroupNorm，`algo/nn/model.py`，`build_model(config)` 按 `arch` 构造）+ `scripts/rl/pretrain_bc.py` 在 `nn_training_data_merged.npz` 上监督预训练（val acc 0.710）。产物 **`output/nn_conv_bc.pt`（纯前馈 ~1 ms）400 局公平池胜率 25.0%，与 Baseline(26.0%)/BeliefExp(25.8%) 打平**。部署：`PPOAgent(model_path='output/nn_conv_bc.pt')`。**PPO 自对弈在其上无加分；融合受弱 `nn_value_model_mc.pt` 拖累不划算。** 结论：真正起作用的是**卷积架构 + 全量 BC**，而非 RL 自对弈本身。
+8. **benchmark 必须 `torch.set_num_threads(1)`**（`benchmark_pool.py` 已设）：多进程 fork 后 torch 线程过度订阅会让 benchmark 慢几十倍。Elo 在小样本/相近对手下不可信，**以胜率为准**，且要同一 pool（Elo 跨 run 漂移）。
+9. **进一步压榨 conv-BC 均失败（纯前馈天花板）**：对手式 PPO 精调退化（convFT 18.8% < convBC 22.0%）；花色置换增广（`pretrain_bc.py::_suit_perms`，6×）修复过拟合但 val acc 仍 0.711、实战持平。BC ≈ 教师(eval2) ≈ Baseline/BeliefExp。
+10. **突破天花板：NN + BeliefExp Hybrid + Search Trace Distillation**。用纯 `BeliefExpectimaxAgent` 当教师，对 `TileConvNet` 做 search trace distillation（soft target，T=4），8000 局数据 + 128/6/512 大网络得到 `output/nn_conv_bc_beliefexp_trace_8000_big_t4.pt`，组装成 `Hybrid-BE8k_t4` 后在 2000 局公平池胜率 25.7%、点炮 15.5%、Elo 1567，成为新的当前最强配置。详见 `docs/designs/conv-bc-roadmap.md`。

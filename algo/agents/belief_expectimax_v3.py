@@ -116,13 +116,18 @@ class BeliefExpectimaxV3Agent(agent.Agent):
                  max_candidates=8,
                  defense_margin=0.03,
                  leaf_evaluator='eval0',
-                 candidate_policy='baseline_eval1'):
+                 candidate_policy='baseline_eval1',
+                 candidate_model_path=None,
+                 candidate_union=False):
         super().__init__(name, verbose)
         self.expectimax_depth = expectimax_depth
         self.max_candidates = max_candidates
         self.defense_margin = defense_margin
         self.leaf_evaluator = leaf_evaluator
         self.candidate_policy = candidate_policy
+        # RL+搜索融合：用指定 policy 模型（如 PPO）生成候选；union 则与默认 nn_model 取并集
+        self.candidate_model_path = candidate_model_path
+        self.candidate_union = candidate_union
         self.context = context_v3.ContextV3()
         self._belief = None
         self._weights_tuple = tuple(sorted(eval_v3.DEFAULT_WEIGHTS.items()))
@@ -250,14 +255,33 @@ class BeliefExpectimaxV3Agent(agent.Agent):
             return 0.0
         return total / weight_sum
 
-    def next(self):
+    def next_with_trace(self):
+        """返回 (chosen_tile, trace)。
+
+        trace = {
+            'candidates': list of tile values in top_k,
+            'scores': dict tile_value -> offense score (expectimax value),
+            'dangers': dict tile_value -> aggregated danger,
+            'selected_value': offense score of chosen tile,
+        }
+        """
         assert len(self.cur) == 14
         candidates = self._unique_tiles(self.cur)
 
         # 预选 top_k 候选：eval0 / NN policy / baseline
         if self.candidate_policy == 'nn':
-            top = _get_nn_policy().top_discards(self.cur, self.context, self.name,
+            nnp = _get_nn_policy()
+            if self.candidate_model_path:
+                alt_model, _ = nnp._load_policy_model_from(self.candidate_model_path)
+                top = nnp.top_discards_with_model(alt_model, self.cur, self.context,
+                                                  self.name, self.max_candidates)
+                if self.candidate_union:
+                    base_top = nnp.top_discards(self.cur, self.context, self.name,
                                                 self.max_candidates)
+                    top = list(dict.fromkeys(list(top) + list(base_top)))
+            else:
+                top = nnp.top_discards(self.cur, self.context, self.name,
+                                       self.max_candidates)
         elif self.candidate_policy == 'baseline':
             # baseline 的 select 给出它认为最优的弃牌序列，作为 NN leaf 的候选池
             top = algo.select(list(self.cur), False, c=self.context)[:self.max_candidates]
@@ -306,6 +330,8 @@ class BeliefExpectimaxV3Agent(agent.Agent):
             _get_nn_leaf().set_leaf_context(self.context, self.name, list(self.cur))
 
         evaluated = []
+        score_map = {}
+        danger_map = {}
         for disc in top:
             hand13 = list(self.cur)
             hand13.remove(disc)
@@ -313,6 +339,8 @@ class BeliefExpectimaxV3Agent(agent.Agent):
             offense = self._expectimax_value(hand13, effective, self.expectimax_depth)
             danger = self._aggregate_danger(disc)
             evaluated.append((offense, danger, disc))
+            score_map[disc] = float(offense)
+            danger_map[disc] = float(danger)
 
         if self.leaf_evaluator == 'nn':
             _get_nn_leaf().clear_leaf_context()
@@ -329,9 +357,19 @@ class BeliefExpectimaxV3Agent(agent.Agent):
             evaluated.sort(reverse=True, key=lambda x: x[0])
             result = evaluated[0][2]
 
+        trace = {
+            'candidates': list(top),
+            'scores': score_map,
+            'dangers': danger_map,
+            'selected_value': float(score_map.get(result, best_offense)),
+        }
+
         self.cur.remove(result)
         self.context.see_tile(result, self.name)
         self._belief = None
         if self.verbose:
             print('出牌:' + tile.tile_to_str(result))
-        return result
+        return result, trace
+
+    def next(self):
+        return self.next_with_trace()[0]
