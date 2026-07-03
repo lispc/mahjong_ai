@@ -33,8 +33,11 @@ def _load_net(model_path, device='cpu'):
         cfg = {'arch': 'mlp', 'input_dim': 175, 'hidden_dim': 256}
     net = build_model(cfg)
     sd = torch.load(model_path, map_location='cpu')
-    if isinstance(sd, dict) and 'model_state_dict' in sd:
-        sd = sd['model_state_dict']
+    if isinstance(sd, dict):
+        if 'model_state_dict' in sd:
+            sd = sd['model_state_dict']
+        elif 'model_state' in sd:
+            sd = sd['model_state']
     # 允许加载含 tenpai_head 的模型到基础结构，或反之（仅加载匹配键）
     missing, unexpected = net.load_state_dict(sd, strict=False)
     if missing:

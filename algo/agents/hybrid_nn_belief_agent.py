@@ -38,6 +38,16 @@ class HybridNNBeliefAgent(agent.Agent):
         super().init_tiles(l)
         self.nn_agent.init_tiles(l)
         self.belief_agent.init_tiles(l)
+        # 让子 agent 共享同一 hand/meld 列表，避免 engine 在 respond_* 时拿到 stale cur
+        self.nn_agent.cur = self.cur
+        self.belief_agent.cur = self.cur
+        self.nn_agent.melds = self.melds
+        self.belief_agent.melds = self.melds
+
+    def add_meld(self, meld_type, tile_val):
+        super().add_meld(meld_type, tile_val)
+        self.nn_agent.add_meld(meld_type, tile_val)
+        self.belief_agent.add_meld(meld_type, tile_val)
 
     def handle_msg(self, msg):
         self.nn_agent.handle_msg(msg)
@@ -80,13 +90,9 @@ class HybridNNBeliefAgent(agent.Agent):
     def next_with_trace(self):
         """返回 (tile, trace)。trace 仅在 critical 状态（使用 BeliefExp）时非空。"""
         if self._is_critical():
-            self.belief_agent.cur = list(self.cur)
             tile_val, trace = self.belief_agent.next_with_trace()
-            self.cur = list(self.belief_agent.cur)
             return tile_val, trace
-        self.nn_agent.cur = list(self.cur)
         tile_val = self.nn_agent.next()
-        self.cur = list(self.nn_agent.cur)
         return tile_val, None
 
     def next(self):
