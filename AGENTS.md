@@ -186,6 +186,23 @@ HybridNNBeliefAgent(
 - `Hybrid-FullAction-32k`：胜率 40.5%，Elo 1601，点炮率 15.0%
 - `Hybrid-BE16k_t8`：胜率 22.0%，Elo 1507，点炮率 20.5%
 
+完整动作 PPO 微调（200 局 vs 32k BC / V3）：
+- `PPO`：胜率 26.5%，Elo 1573，点炮率 17.5%
+- `BC32k`：胜率 28.0%，Elo 1477，点炮率 21.0%
+- `V3`：胜率 16.0%，Elo 1450，点炮率 17.5%
+- PPO 在自对弈指标上只是边际提升，但在真实 pool 中 Elo 比 32k BC 高约 100，点炮率明显更低。
+
+进行中：
+- **128k 行为克隆**：数据已生成（128k 局，547万弃牌/1681万响应样本），正在 4 GPU DataParallel 上训练。
+  ```bash
+  PYTHONPATH=. python3 scripts/rl/train_full_action.py \
+      output/nn_full_action_data_128000.npz \
+      output/nn_full_action_best.pt \
+      output/nn_full_action_128000.pt \
+      --epochs 30 --batch 2048 --lr 0.001 --resp_weight 0.5 --num_workers 4
+  ```
+  脚本会自动使用 `nn.DataParallel` 调用所有可见 GPU。
+
 旧模型保留：
 - `output/nn_full_action_32000.pt` / `_config.json`（32k 原始训练输出）
 - `output/nn_full_action_4000.pt` / `_config.json`（4k 版，已被 best 覆盖）
@@ -193,7 +210,7 @@ HybridNNBeliefAgent(
   - 训练数据：16000 局纯 `BeliefExpectimaxAgent` 搜索轨迹（734073 样本）
   - 蒸馏设置：α=0.5，T=8，β=0.3，λ_dealin=0.5
 
-当前 best **Hybrid-BE16k_t8** 在 2000 局公平 pool 中胜率 **25.8%**、点炮 **16.3%**、Elo **1581**，详见 `docs/handoff.md` 与 `docs/designs/conv-bc-roadmap.md`。
+当前 best **Hybrid-FullAction-32k** 在 2000 局公平 pool 中胜率 **33.8%**、点炮 **16.8%**、Elo **1680**。
 
 备份：
 - `output/nn_conv_bc_beliefexp_trace_8000_big_t8.pt` / `..._config.json`（上一版本候选）

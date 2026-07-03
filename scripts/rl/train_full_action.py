@@ -65,6 +65,10 @@ def split_outputs(model, cfg, out):
     return d_logit, val, dealin_logit, cv_logit, response_logit
 
 
+def base_model(model):
+    return model.module if isinstance(model, torch.nn.DataParallel) else model
+
+
 def masked_response_loss(logits, actions, legal_mask):
     """只让 legal action 参与 softmax 的 CE。"""
     logits = logits.clone()
@@ -92,7 +96,7 @@ def evaluate(model, cfg, loader_disc, loader_resp, device):
             sum_v_loss += F.mse_loss(val.squeeze(1), vb).item() * vb.size(0)
             n_v += vb.size(0)
             if cfg.get('tenpai_head', False):
-                t_logit = model.tenpai_logit(xb)
+                t_logit = base_model(model).tenpai_logit(xb)
                 sum_t_loss += F.binary_cross_entropy_with_logits(t_logit.squeeze(1), tb).item() * tb.size(0)
                 n_t += tb.size(0)
 
@@ -127,11 +131,16 @@ def main():
     ap.add_argument('--lr', type=float, default=0.001)
     ap.add_argument('--wd', type=float, default=1e-5)
     ap.add_argument('--resp_weight', type=float, default=1.0)
-    ap.add_argument('--val_ratio', type=float, default=0.1)
+    ap.add_argument('--val_ratio', type=float, default=0.05)
     ap.add_argument('--seed', type=int, default=42)
+    ap.add_argument('--dp', type=int, default=1,
+                    help='use nn.DataParallel if multiple GPUs available (1=auto, 0=force single)')
+    ap.add_argument('--num_workers', type=int, default=4,
+                    help='DataLoader CPU workers for training loaders')
     args = ap.parse_args()
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    use_dp = args.dp and torch.cuda.device_count() > 1
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
@@ -149,8 +158,8 @@ def main():
 
     n_disc = len(Xd)
     n_resp = len(Xr)
-    n_val_disc = int(n_disc * args.val_ratio)
-    n_val_resp = int(n_resp * args.val_ratio)
+    n_val_disc = max(1, int(n_disc * args.val_ratio))
+    n_val_resp = max(1, int(n_resp * args.val_ratio))
 
     idxd = np.random.permutation(n_disc)
     idxr = np.random.permutation(n_resp)
@@ -165,14 +174,26 @@ def main():
     train_resp = TensorDataset(Xr[tr_ir], yr[tr_ir], lr[tr_ir], vr[tr_ir])
     val_resp = TensorDataset(Xr[va_ir], yr[va_ir], lr[va_ir], vr[va_ir])
 
-    loader_disc = DataLoader(train_disc, batch_size=args.batch, shuffle=True, drop_last=True)
-    loader_resp = DataLoader(train_resp, batch_size=args.batch, shuffle=True, drop_last=True)
-    val_loader_disc = DataLoader(val_disc, batch_size=args.batch, shuffle=False)
-    val_loader_resp = DataLoader(val_resp, batch_size=args.batch, shuffle=False)
+    loader_disc = DataLoader(train_disc, batch_size=args.batch, shuffle=True,
+                             drop_last=True, num_workers=args.num_workers,
+                             pin_memory=True if device.type == 'cuda' else False)
+    loader_resp = DataLoader(train_resp, batch_size=args.batch, shuffle=True,
+                             drop_last=True, num_workers=args.num_workers,
+                             pin_memory=True if device.type == 'cuda' else False)
+    val_loader_disc = DataLoader(val_disc, batch_size=args.batch, shuffle=False,
+                                 num_workers=args.num_workers,
+                                 pin_memory=True if device.type == 'cuda' else False)
+    val_loader_resp = DataLoader(val_resp, batch_size=args.batch, shuffle=False,
+                                 num_workers=args.num_workers,
+                                 pin_memory=True if device.type == 'cuda' else False)
 
     print(f'Loading init model {args.init_model}')
     model, cfg = load_model(args.init_model, device)
     print('Model cfg:', cfg)
+
+    if use_dp:
+        model = torch.nn.DataParallel(model, device_ids=list(range(torch.cuda.device_count())))
+        print(f'Using DataParallel on {torch.cuda.device_count()} GPUs')
 
     if not cfg.get('response_head', False):
         raise ValueError('init model must have response_head=True')
@@ -219,7 +240,7 @@ def main():
             loss_v = F.mse_loss(val_d.squeeze(1), vb)
             loss_t = 0.0
             if cfg.get('tenpai_head', False):
-                t_logit = model.tenpai_logit(xb)
+                t_logit = base_model(model).tenpai_logit(xb)
                 loss_t = F.binary_cross_entropy_with_logits(t_logit.squeeze(1), tb)
 
             # response branch
@@ -262,7 +283,7 @@ def main():
     with open(out_cfg_path, 'w') as f:
         json.dump(best_cfg, f, indent=2)
 
-    torch.save({'model_state': model.state_dict(), 'config': best_cfg}, args.out_model)
+    torch.save({'model_state': base_model(model).state_dict(), 'config': best_cfg}, args.out_model)
     print(f'Saved {args.out_model} + {out_cfg_path}')
 
 
