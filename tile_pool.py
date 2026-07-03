@@ -20,3 +20,9 @@ class Pool:
         assert len(result) == n
         self.idx += n
         return result
+
+    def draw_replacement(self):
+        """从牌山尾部摸一张（杠后摸牌）。"""
+        if self.idx >= len(self.tiles):
+            return None
+        return self.tiles.pop()

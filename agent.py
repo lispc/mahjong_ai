@@ -11,15 +11,24 @@ class Message:
 
 class Agent:
     def __init__(self, name, verbose=True):
-        self.cur = []
+        self.cur = []            # 闭手（不含副露）
+        self.melds = []          # [(type, tile), ...] 已吃/碰/杠的副露
         self.name = name
         self.verbose = verbose
+
+    def full_hand(self):
+        """返回完整手牌：闭手 + 副露牌。"""
+        return list(self.cur) + [t for _, t in self.melds]
+
+    def add_meld(self, meld_type, tile_val):
+        self.melds.append((meld_type, tile_val))
 
     def __eq__(self, other):
         return self.name == other.name
 
     def init_tiles(self, l):
         self.cur = l
+        self.melds = []
 
     def handle_msg(self, msg):
         if msg.type == 'put' and msg.sender != self.name:
@@ -31,7 +40,7 @@ class Agent:
 
     def add(self, t):
         self.cur.append(t)
-        ok = algo.is_succ(self.cur)
+        ok = algo.is_succ(self.full_hand())
         if self.verbose:
             print('摸牌:' + tile.tile_to_str(t))
         #if ok:
@@ -39,7 +48,7 @@ class Agent:
         return ok
 
     def next(self):
-        assert len(self.cur) == 14
+        assert len(self.cur) >= 1
         result = algo.select(self.cur, False)[0]
         self.cur.remove(result)
         if self.verbose:
@@ -51,6 +60,25 @@ class Agent:
         返回是否报听。hand 为弃牌后的 13 张手牌。
         基类默认不报听；子类可覆盖。
         """
+        return False
+
+    # ---- 碰/杠/和响应接口（完整动作空间） ----
+    def respond_hu(self, tile_val, context=None):
+        """有人打出 tile_val，是否胡牌。基类用手牌判断。"""
+        return algo.is_succ(self.full_hand() + [tile_val])
+
+    def _can_peng(self, tile_val):
+        return sum(1 for t in self.cur if t == tile_val) >= 2
+
+    def _can_gang(self, tile_val):
+        return sum(1 for t in self.cur if t == tile_val) >= 3
+
+    def respond_peng(self, tile_val, context=None):
+        """是否碰牌。基类默认不碰。"""
+        return False
+
+    def respond_gang(self, tile_val, context=None):
+        """是否杠牌。基类默认不杠。"""
         return False
 
     def print(self):
