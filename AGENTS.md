@@ -164,7 +164,7 @@ tail -f output/compute_mc_values_pypy_5000_part0.log
 from algo.agents.hybrid_nn_belief_agent import HybridNNBeliefAgent
 
 HybridNNBeliefAgent(
-    'Hybrid-FullAction-4k',
+    'Hybrid-FullAction-32k',
     nn_model_path='output/nn_full_action_best.pt',
     belief_kind='beliefexp',
     tenpai_threshold=28,
@@ -177,14 +177,19 @@ HybridNNBeliefAgent(
   - `TileConvNet`，128 channels / 6 residual blocks / 512 hidden
   - 带 dealin head、value head、tenpai head 与 **response head**（碰/杠/胡声明）
 
-最近 benchmark（400 局，对手为上一版 best `Hybrid-BE16k_t8` 与 `BeliefExpectimaxV3`）：
-- `Hybrid-FullAction-4k`：胜率 35.2%，Elo 1689，点炮率 15.0%
-- `Hybrid-BE16k_t8`：胜率 25.0%，Elo 1410，点炮率 17.4%
-- `BeliefExpectimaxV3`：胜率 12.8%，Elo 1401，点炮率 22.5%
+最近 benchmark（400 局，对手为 4k 版 `Hybrid-FullAction-4k` 与 `BeliefExpectimaxV3`）：
+- `Hybrid-FullAction-32k`：胜率 33.8%，Elo 1680，点炮率 16.8%
+- `Hybrid-FullAction-4k`：胜率 28.2%，Elo 1496，点炮率 18.2%
+- `BeliefExpectimaxV3`：胜率 9.2%，Elo 1324，点炮率 21.7%
 
-上一版 best（保留）：
-- `output/nn_conv_bc_beliefexp_trace_16000_big_t8.pt` + `_config.json`
-- `TileConvNet`，128 channels / 6 residual blocks / 512 hidden，带 dealin head 与 value head（无 response head）
+对上一版旧 best `Hybrid-BE16k_t8`（200 局）：
+- `Hybrid-FullAction-32k`：胜率 40.5%，Elo 1601，点炮率 15.0%
+- `Hybrid-BE16k_t8`：胜率 22.0%，Elo 1507，点炮率 20.5%
+
+旧模型保留：
+- `output/nn_full_action_32000.pt` / `_config.json`（32k 原始训练输出）
+- `output/nn_full_action_4000.pt` / `_config.json`（4k 版，已被 best 覆盖）
+- `output/nn_conv_bc_beliefexp_trace_16000_big_t8.pt` + `_config.json`（旧 best，无 response head）
   - 训练数据：16000 局纯 `BeliefExpectimaxAgent` 搜索轨迹（734073 样本）
   - 蒸馏设置：α=0.5，T=8，β=0.3，λ_dealin=0.5
 

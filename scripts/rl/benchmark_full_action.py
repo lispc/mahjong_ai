@@ -20,9 +20,9 @@ from algo.agents.ppo_agent import PPOAgent
 from algo.agents.belief_expectimax_v3 import BeliefExpectimaxV3Agent
 
 
-NN_PATH = 'output/nn_full_action_4000.pt'
+NN_PATH = 'output/nn_full_action_32000.pt'
 BEST_PATH = 'output/nn_conv_bc_beliefexp_trace_16000_big_t8.pt'
-AGENT_NAMES = ['FullNN', 'Best', 'V3']
+AGENT_NAMES = ['FullNN-32k', 'OldBest', 'V3']
 
 
 def _set_env():
@@ -40,7 +40,7 @@ def _set_env():
 def make_full():
     _set_env()
     return HybridNNBeliefAgent(
-        'FullNN',
+        'FullNN-32k',
         nn_model_path=NN_PATH,
         belief_kind='beliefexp',
         device='cpu',
@@ -52,7 +52,7 @@ def make_full():
 def make_best():
     _set_env()
     return HybridNNBeliefAgent(
-        'Best',
+        'OldBest',
         nn_model_path=BEST_PATH,
         belief_kind='beliefexp',
         device='cpu',
