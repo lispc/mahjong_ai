@@ -82,7 +82,7 @@ class TileConvNet(nn.Module):
 
     def __init__(self, input_dim=175, channels=96, n_blocks=4, hidden_dim=256,
                  n_tile_ch=5, tile_len=34, dealin_head=False, tenpai_head=False,
-                 candidate_value_head=False):
+                 candidate_value_head=False, response_head=False):
         super().__init__()
         self.n_tile = n_tile_ch * tile_len            # 170
         self.n_tile_ch = n_tile_ch
@@ -91,6 +91,7 @@ class TileConvNet(nn.Module):
         self.use_dealin = dealin_head
         self.use_tenpai = tenpai_head
         self.use_candidate_value = candidate_value_head
+        self.use_response = response_head
         self.hidden_dim = hidden_dim
         self.stem = nn.Conv1d(n_tile_ch, channels, 3, padding=1)
         self.stem_bn = _gn(channels)
@@ -109,6 +110,9 @@ class TileConvNet(nn.Module):
         if self.use_candidate_value:
             self.cv_conv = nn.Conv1d(channels, 1, 1)
             self.cv_glob = nn.Linear(gfeat_dim, 34)
+        if self.use_response:
+            self.response_fc = nn.Linear(gfeat_dim, hidden_dim // 2)
+            self.response_head = nn.Linear(hidden_dim // 2, 4)  # pass/peng/gang/hu
         # 输出层零初始化：初始 policy 近均匀、value≈0，避免 tanh 早期饱和崩溃
         for layer in (self.policy_conv, self.policy_glob, self.value_head):
             nn.init.zeros_(layer.weight)
@@ -126,6 +130,9 @@ class TileConvNet(nn.Module):
             nn.init.zeros_(self.cv_conv.bias)
             nn.init.zeros_(self.cv_glob.weight)
             nn.init.zeros_(self.cv_glob.bias)
+        if self.use_response:
+            nn.init.zeros_(self.response_head.weight)
+            nn.init.zeros_(self.response_head.bias)
 
     def _trunk(self, x):
         B = x.shape[0]
@@ -148,6 +155,9 @@ class TileConvNet(nn.Module):
         if self.use_candidate_value:
             cv_logits = self.cv_conv(h).squeeze(1) + self.cv_glob(gfeat)
             outs.append(cv_logits)
+        if self.use_response:
+            response_logits = self.response_head(torch.relu(self.response_fc(gfeat)))
+            outs.append(response_logits)
         return tuple(outs)
 
     def tenpai_logit(self, x):
@@ -170,5 +180,6 @@ def build_model(config):
                            n_tile_ch=config.get('n_tile_ch', 5),
                            dealin_head=config.get('dealin_head', False),
                            tenpai_head=config.get('tenpai_head', False),
-                           candidate_value_head=config.get('candidate_value_head', False))
+                           candidate_value_head=config.get('candidate_value_head', False),
+                           response_head=config.get('response_head', False))
     return MahjongNet(input_dim=input_dim, hidden_dim=config.get('hidden_dim', 128))

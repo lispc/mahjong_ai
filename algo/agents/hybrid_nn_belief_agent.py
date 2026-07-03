@@ -48,7 +48,19 @@ class HybridNNBeliefAgent(agent.Agent):
         # 先问 NN；若 NN 不报听再问 belief（保持行为一致）
         return self.nn_agent.declare_tenpai(hand, context)
 
+    def respond_hu(self, tile_val, context=None):
+        return self.nn_agent.respond_hu(tile_val, context)
+
+    def respond_peng(self, tile_val, context=None):
+        return self.nn_agent.respond_peng(tile_val, context)
+
+    def respond_gang(self, tile_val, context=None):
+        return self.nn_agent.respond_gang(tile_val, context)
+
     def _is_critical(self):
+        # 有副露时 BeliefExp 未适配闭手长度，强制走 NN
+        if len(self.cur) != 14:
+            return False
         ctx = self.nn_agent.context
         if ctx is None:
             return False

@@ -89,9 +89,10 @@ class PPOAgent(BeliefExpectimaxV3Agent):
         return _NET_CACHE[(os.path.abspath(self.model_path), self.device)][1]
 
     def next(self):
-        assert len(self.cur) == 14
+        assert len(self.cur) >= 1
         net = self._net_obj()
-        feats = self._extract(self.context, self.cur, self.name)
+        # 特征用完整手牌（闭手+副露），但合法动作只在闭手上
+        feats = self._extract(self.context, self.full_hand(), self.name)
         x = torch.from_numpy(np.asarray(feats, dtype=np.float32)).unsqueeze(0).to(self.device)
         with torch.no_grad():
             logits = net(x)[0]
@@ -119,3 +120,82 @@ class PPOAgent(BeliefExpectimaxV3Agent):
             import tile
             print('出牌:' + tile.tile_to_str(tile_val))
         return tile_val
+
+    def _response_features(self, tile_val):
+        """把 offered tile 并入完整手牌特征，让 response head 看见。"""
+        hand = self.full_hand() + [tile_val]
+        feats = self._extract(self.context, hand, self.name)
+        return torch.from_numpy(np.asarray(feats, dtype=np.float32)).unsqueeze(0).to(self.device)
+
+    def _response_action(self, tile_val, legal_mask):
+        """返回 action index：0=pass, 1=peng, 2=gang, 3=hu。"""
+        if not self._cfg.get('response_head', False):
+            return None
+        net = self._net_obj()
+        x = self._response_features(tile_val)
+        with torch.no_grad():
+            out = net(x)
+            response_logits = out[-1]  # 最后一个输出是 response_head
+        logits = response_logits.squeeze(0).cpu().numpy().astype(np.float64)
+        masked = logits + (legal_mask - 1.0) * 1e9
+        if self.temperature and self.temperature > 1e-6:
+            m = masked / self.temperature
+            m = m - m.max()
+            probs = np.exp(m)
+            probs = probs / probs.sum()
+            a = int(np.random.choice(4, p=probs))
+        else:
+            a = int(np.argmax(masked))
+        return a
+
+    def respond_hu(self, tile_val, context=None):
+        legal = np.zeros(4, dtype=np.float32)
+        legal[0] = 1.0
+        if super().respond_hu(tile_val, context):
+            legal[3] = 1.0
+        a = self._response_action(tile_val, legal)
+        return a == 3 if a is not None else bool(legal[3])
+
+    def respond_peng(self, tile_val, context=None):
+        legal = np.zeros(4, dtype=np.float32)
+        legal[0] = 1.0
+        if self._can_peng(tile_val):
+            legal[1] = 1.0
+        a = self._response_action(tile_val, legal)
+        return a == 1 if a is not None else False
+
+    def respond_gang(self, tile_val, context=None):
+        legal = np.zeros(4, dtype=np.float32)
+        legal[0] = 1.0
+        if self._can_gang(tile_val):
+            legal[2] = 1.0
+        a = self._response_action(tile_val, legal)
+        return a == 2 if a is not None else False
+
+
+class HeuristicResponsePPOAgent(PPOAgent):
+    """PPOAgent 的响应动作改为强启发式，用于生成 teacher 数据。
+
+    - 胡：能胡必胡；
+    - 杠：能杠必杠（杠可补牌，通常正期望）；
+    - 碰：仅碰字牌或快听牌时的碰；
+    - 弃牌仍走原 NN policy。
+    """
+
+    def respond_hu(self, tile_val, context=None):
+        return super(PPOAgent, self).respond_hu(tile_val, context)
+
+    def respond_gang(self, tile_val, context=None):
+        return self._can_gang(tile_val)
+
+    def respond_peng(self, tile_val, context=None):
+        if not self._can_peng(tile_val):
+            return False
+        # 字牌/幺九优先碰
+        if tile_val >= 31 or tile_val % 10 in (1, 9):
+            return True
+        # 向听数 ≤ 2 时倾向碰以加速听牌
+        from algo.eval.v2 import shanten
+        if shanten(self.full_hand()) <= 2:
+            return True
+        return False

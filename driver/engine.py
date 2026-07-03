@@ -26,14 +26,14 @@ def _claim_peng(agent, tile_val):
     """执行碰：从闭手移除两张 tile_val，添加副露。"""
     for _ in range(2):
         agent.cur.remove(tile_val)
-    agent.add_meld(('peng', tile_val))
+    agent.add_meld('peng', tile_val)
 
 
 def _claim_gang(agent, tile_val):
     """执行杠：从闭手移除三张 tile_val，添加副露。"""
     for _ in range(3):
         agent.cur.remove(tile_val)
-    agent.add_meld(('gang', tile_val))
+    agent.add_meld('gang', tile_val)
 
 
 def _process_claims(agents, discarded, discarder_turn, pool, locked_names,
