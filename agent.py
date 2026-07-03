@@ -31,11 +31,9 @@ class Agent:
         self.melds = []
 
     def handle_msg(self, msg):
-        if msg.type == 'put' and msg.sender != self.name:
-            t = msg.data
-            if algo.is_succ(self.cur + [t]):
-                self.cur.append(t)
-                return Message(self.name, 'i_win', None)
+        # 旧版本曾用 message 机制检测“这张弃牌能否胡”，现已由 respond_hu 统一处理，
+        # 这里不再修改手牌，避免在副露/响应场景下手牌数错乱。
+        from agent import Message
         return Message(self.name, 'no_op', None)
 
     def add(self, t):
