@@ -437,16 +437,17 @@ value head 微调产物：`output/nn_full_action_valueft.pt`（val_mse 0.6758）
 
 **当前状态**：
 - Agent/数据/训练/自动 monitor 脚本已 commit。
-- 200 局真实 trace 正在 GPU1 后台生成（`output/alphazero_trace_200.npz`），使用 valueft 作为基线 policy，**outcome 作为 value target**，并限制了 worker 线程数以避免 OpenMP 争用；完成后由 `scripts/rl/wait_and_train_az.py` 自动在 GPU0 训练第一个 AZ model：`output/nn_full_action_az.pt`。
+- 200 局真实 trace 正在 GPU1 后台生成（`output/alphazero_trace_200.npz`），使用 valueft 作为基线 policy，**outcome 作为 value target**，16 workers 加速；完成后由 `scripts/rl/wait_and_train_az.py` 自动在 GPU0 训练第一个 AZ model：`output/nn_full_action_az.pt`。
 
-**生成命令（新版）**：
+**生成命令（新版，16 workers 加速）**：
 ```bash
 CUDA_VISIBLE_DEVICES=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 \
 PYTHONPATH=. python3 scripts/rl/gen_alphazero_data.py \
-    output/nn_full_action_valueft.pt output/alphazero_trace_200.npz 200 4 \
+    output/nn_full_action_valueft.pt output/alphazero_trace_200.npz 200 16 \
     --n-worlds 4 --n-sims 16 --max-depth 2 --device cuda \
     --value-target outcome --resume
 ```
+当前实测：4 workers 时约 65 s/局；提升到 16 workers 后有效约 30 s/局，200 局约 1 h。
 
 **训练命令**：
 ```bash
