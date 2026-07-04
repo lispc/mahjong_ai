@@ -181,9 +181,9 @@ def main():
     train_d, val_d = random_split(ds_d, [n_train_d, n_val_d],
                                   generator=torch.Generator().manual_seed(42))
     loader_d = DataLoader(train_d, batch_size=args.batch, shuffle=True,
-                          num_workers=4, pin_memory=True)
+                          num_workers=0, pin_memory=True)
     val_loader_d = DataLoader(val_d, batch_size=args.batch, shuffle=False,
-                              num_workers=4, pin_memory=True)
+                              num_workers=0, pin_memory=True)
 
     # response dataset
     ds_r = TensorDataset(torch.tensor(Xr, dtype=torch.float32),
@@ -194,9 +194,9 @@ def main():
     train_r, val_r = random_split(ds_r, [n_train_r, n_val_r],
                                   generator=torch.Generator().manual_seed(42))
     loader_r = DataLoader(train_r, batch_size=args.batch, shuffle=True,
-                          num_workers=4, pin_memory=True)
+                          num_workers=0, pin_memory=True)
     val_loader_r = DataLoader(val_r, batch_size=args.batch, shuffle=False,
-                              num_workers=4, pin_memory=True)
+                              num_workers=0, pin_memory=True)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.wd)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
