@@ -417,7 +417,7 @@ value head 微调产物：`output/nn_full_action_valueft.pt`（val_mse 0.6758）
 
 ---
 
-## 6.8 AlphaZero MCTS 迭代管线（进行中，2026-07-05）
+## 6.8 AlphaZero MCTS 迭代管线（已完成第一轮，2026-07-05）
 
 为实现「search → stronger value/policy → stronger search」的迭代，建立 AlphaZero 风格管线：
 
@@ -426,20 +426,28 @@ value head 微调产物：`output/nn_full_action_valueft.pt`（val_mse 0.6758）
    - 每步记录 `(features, visit_distribution, value_target)`；
    - value target 默认改为**该局最终 outcome**（P0 赢 +1 / 输 -1 / 流局 0），而不是搜索根节点的内部 value；
    - 已加入 checkpoint/resume：每 50 局保存 `.checkpoint.npz`，崩溃后可 `--resume` 续跑；
-   - 参数示例：`n_worlds=4, n_sims=16, max_depth=2`，单局约 4 min（4 workers 下 200 局约 3.5 h）。
+   - 参数：`n_worlds=4, n_sims=16, max_depth=2`，16 workers 下 200 局约 **50 min**。
 
 2. **在 trace 上训练 policy + value**：`scripts/rl/train_alphazero.py`  
    - policy：用 visit distribution 做 soft target；
    - value：用 trace 中的 outcome 做 MSE；
-   - 同时保留 response head 的 BC。
+   - 同时保留 response head 的 BC；
+   - 60 epoch 约 **36 min**，最终 `val_policy≈1.24, val_value≈0.17, val_response≈0.002`。
 
-3. **benchmark 新模型**，若胜率提升则替换 best，再进入下一轮。
+3. **benchmark 新模型**：`scripts/rl/benchmark_az_vs_base.py`。
 
-**当前状态**：
-- Agent/数据/训练/自动 monitor 脚本已 commit。
-- 200 局真实 trace 正在 GPU1 后台生成（`output/alphazero_trace_200.npz`），使用 valueft 作为基线 policy，**outcome 作为 value target**，16 workers 加速；完成后由 `scripts/rl/wait_and_train_az.py` 自动在 GPU0 训练第一个 AZ model：`output/nn_full_action_az.pt`。
+**第一轮结果（`output/nn_full_action_az.pt` vs `output/nn_full_action_best.pt`）**：
 
-**生成命令（新版，16 workers 加速）**：
+| Agent | 400 局 win | self | ron | deal-in | Elo |
+|---|---|---|---|---|---|
+| Hybrid-AZ | 47.2% | 24.5% | 22.8% | 26.2% | 1419 |
+| Hybrid-Base | 52.8% | 26.5% | 26.2% | 22.8% | 1581 |
+
+- **未超越 base**：胜率低 5.6 pp，点炮高 3.4 pp。
+- 原因分析：200 局 trace 仅 2281 条样本，MCTS search quality 受限于 `n_sims=16 / max_depth=2`，policy target 噪音大；value target 用 outcome 方差高。
+- **结论**：第一轮 AZ bootstrap **阴性**，但管线已跑通。下一轮需要**更多/更高质量的 trace**（提升 n_sims/depth、增加局数），或改 value target 为 MCTS 内部值 / 更强的 outcome baseline。
+
+**生成命令（16 workers）**：
 ```bash
 CUDA_VISIBLE_DEVICES=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 \
 PYTHONPATH=. python3 scripts/rl/gen_alphazero_data.py \
@@ -447,7 +455,6 @@ PYTHONPATH=. python3 scripts/rl/gen_alphazero_data.py \
     --n-worlds 4 --n-sims 16 --max-depth 2 --device cuda \
     --value-target outcome --resume
 ```
-当前实测：4 workers 时约 65 s/局；提升到 16 workers 后有效约 30 s/局，200 局约 1 h。
 
 **训练命令**：
 ```bash
@@ -456,12 +463,10 @@ CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. python3 scripts/rl/train_alphazero.py \
     output/nn_full_action_best.pt output/nn_full_action_az.pt
 ```
 
-**自动训练 monitor**：
+**快速 benchmark 命令**：
 ```bash
-CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. python3 scripts/rl/wait_and_train_az.py \
-    output/alphazero_trace_200.npz output/nn_full_action_data_128000.npz \
-    output/nn_full_action_best.pt output/nn_full_action_az.pt \
-    output/wait_and_train_az_200.log
+CUDA_VISIBLE_DEVICES=1 PYTHONPATH=. python3 scripts/rl/benchmark_az_vs_base.py \
+    output/nn_full_action_az.pt 400 16 --device cuda
 ```
 
 ---
