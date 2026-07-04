@@ -213,6 +213,9 @@ def main():
 
         epoch_path = args.out_model.replace('.pt', f'_epoch_{epoch:02d}.pt')
         torch.save({'model_state': model.state_dict(), 'config': cfg, 'epoch': epoch}, epoch_path)
+        epoch_cfg_path = epoch_path.replace('.pt', '_config.json')
+        with open(epoch_cfg_path, 'w') as f:
+            json.dump(cfg, f, indent=2)
 
         val_sum = val_m['policy_loss'] + val_m['value_loss'] + val_m['response_loss']
         if val_sum < best_val:
