@@ -375,7 +375,8 @@ DetMCTS + NN value 截断已快速验证：400 局 benchmark Elo 仅 **1315**，
 3. 只保留 `A >= min_adv` 的样本，并以 `exp(A / τ)` 加权做 BC 微调。
 
 **训练配置 v1**：`--weight-temp 1.0 --min-adv -0.2 --bc-weight 0.1`，10 epoch，GPU0。  
-**训练配置 v2**：`--weight-temp 0.5 --min-adv 0.0 --bc-weight 0.0`（更激进加权）。
+**训练配置 v2**：`--weight-temp 0.5 --min-adv 0.0 --bc-weight 0.0`（更激进加权）。  
+**训练配置 v3**：`--value-is-policy`，用 `output/nn_full_action_valueft.pt` 的 value head 做基线；`--weight-temp 0.5 --min-adv 0.0 --bc-weight 0.0`。
 
 **结果**：
 
@@ -387,10 +388,16 @@ DetMCTS + NN value 截断已快速验证：400 局 benchmark Elo 仅 **1315**，
 | Hybrid-awbc v1 | 800 局 | 33.2% | 17.8% | 1597 |
 | Hybrid-hyb | ablation pool | 35.0% | 18.0% | 1653 |
 | Hybrid-awbc v2 | ablation pool | 29.5% | 19.8% | 1515 |
+| Hybrid-hyb | AWBC v3 pool | 32.2% | 17.2% | 1454 |
+| Hybrid-awbc v3 | AWBC v3 pool | 35.0% | 17.5% | 1608 |
+| Hybrid-hyb | AWBC v3 pool 800 | 34.5% | 16.5% | 1542 |
+| Hybrid-awbc v3 | AWBC v3 pool 800 | 33.2% | 17.6% | 1597 |
 
-- v1 在 800 局与 base 基本打平，Elo 略高；v2 在 ablation pool 中略差。
+- v1/v3 在 400 局都曾略好，但 800 局均与 base 打平；Elo consistently 略高，胜率未形成统计显著超越。
 - 纯 PPO 形态中 AWBC 显著降低点炮（24.0% → 19.5%），但胜率不变。
-- **结论**：AWBC 是可行的动作级价值利用方式，但当前 value net 质量限制了上限；**未形成统计显著超越**。
+- **结论**：AWBC 思路可行，但当前 value net 质量仍是瓶颈；需要更强的 conv value net 或 search-value 标签才能越过 BC 天花板。
+
+value head 微调产物：`output/nn_full_action_valueft.pt`（val_mse 0.6758）。
 
 ---
 
@@ -407,6 +414,43 @@ DetMCTS + NN value 截断已快速验证：400 局 benchmark Elo 仅 **1315**，
 5. **可删除的组件**：128k 继续训练、对手建模、DPO/PPO/KTO、AWBC（未确认）。
 
 三个后续突破方向的详细分析与历史对照，见 **`docs/reports/future_directions_analysis.md`**。
+
+---
+
+## 6.8 AlphaZero MCTS 迭代管线（进行中，2026-07-05）
+
+为实现「search → stronger value/policy → stronger search」的迭代，建立 AlphaZero 风格管线：
+
+1. **MCTS self-play 生成 trace**：`scripts/rl/gen_alphazero_data.py`  
+   - 用 `AlphaZeroMCTSAgent` 对当前 best policy 做 determinized PUCT；
+   - 每步记录 `(features, visit_distribution, game_outcome)`；
+   - 参数示例：`n_worlds=4, n_sims=16, max_depth=2`，约 7 min/局。
+
+2. **在 trace 上训练 policy + value**：`scripts/rl/train_alphazero.py`  
+   - policy：用 visit distribution 做 soft target；
+   - value：用 trace 中的 outcome 做 MSE；
+   - 同时保留 response head 的 BC。
+
+3. **benchmark 新模型**，若胜率提升则替换 best，再进入下一轮。
+
+**当前状态**：
+- Agent/数据/训练脚本已 commit。
+- 200 局真实 trace 已在后台生成（`output/alphazero_trace_200.npz`，GPU1）。
+- 完成后训第一个 AZ model：`output/nn_full_action_az.pt`。
+
+**生成命令**：
+```bash
+CUDA_VISIBLE_DEVICES=1 PYTHONPATH=. python3 scripts/rl/gen_alphazero_data.py \
+    output/nn_full_action_valueft.pt output/alphazero_trace_200.npz 200 4 \
+    --n-worlds 4 --n-sims 16 --max-depth 2 --device cuda
+```
+
+**训练命令**：
+```bash
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. python3 scripts/rl/train_alphazero.py \
+    output/alphazero_trace_200.npz output/nn_full_action_data_128000.npz \
+    output/nn_full_action_best.pt output/nn_full_action_az.pt
+```
 
 ---
 
