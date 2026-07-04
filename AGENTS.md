@@ -192,16 +192,22 @@ HybridNNBeliefAgent(
 - `V3`：胜率 16.0%，Elo 1450，点炮率 17.5%
 - PPO 在自对弈指标上只是边际提升，但在真实 pool 中 Elo 比 32k BC 高约 100，点炮率明显更低。
 
-进行中：
-- **128k 行为克隆**：数据已生成（128k 局，547万弃牌/1681万响应样本），正在 4 GPU DataParallel 上训练。
-  ```bash
-  PYTHONPATH=. python3 scripts/rl/train_full_action.py \
-      output/nn_full_action_data_128000.npz \
-      output/nn_full_action_best.pt \
-      output/nn_full_action_128000.pt \
-      --epochs 30 --batch 2048 --lr 0.001 --resp_weight 0.5 --num_workers 4
-  ```
-  脚本会自动使用 `nn.DataParallel` 调用所有可见 GPU。
+**128k 行为克隆已完成**（30 epoch，3 GPU DataParallel）：
+- 数据：`output/nn_full_action_data_128000.npz`（128k 局，约 547 万 discard / 1681 万 response 样本）。
+- 训练从 `output/nn_full_action_best.pt` 热启；Epoch 1 后 val disc_acc 为 **0.9444**，后续 29 epoch 完全 plateau（loss/acc 几乎不变）。
+- 脚本已支持 **每 epoch checkpoint + 断点续跑**：`output/nn_full_action_128000_epoch_{N}.pt` + `_config.json`，可用 `--resume` 恢复。
+- 关键 benchmark（200 局，pool 含 PPO/BC32k）：
+  - Epoch 1：`BC128k_E1` Elo **1601**，点炮 **16.5%**
+  - Epoch 7：`BC128k_E7` Elo **1621**（128k 里最高）
+  - Epoch 30（final）：`BC128k_E30` Elo **1566**，点炮 **20.0%**
+- 结论：**单纯把 BC 数据从 32k 放大到 128k 没有稳定收益**，最终模型反而不如中间 epoch；未替换 best。
+
+**DPO（完整动作，outcome-level 偏好对）**：
+- 实现：`scripts/rl/train_full_action_dpo.py`。
+- 从 `output/nn_full_action_best.pt` 热启，用 128k 数据里的 `v_discard/v_response` 构造偏好对（赢=chosen，输=rejected）。
+- 10 epochs，β=0.1，lr=5e-5；discard DPO acc 从 0.656 提到 0.717，但 response 几乎没动（0.055）。
+- Benchmark（200 局）：DPO Elo **1333**，胜率 5.0%，点炮 26.0%；明显弱于 BC32k（1612）和 PPO（1596）。
+- 结论：**跨状态构造 outcome-level 偏好对的 DPO 不适合当前数据**，模型学到了区分赢/输样本，但没有转化成更强的策略。
 
 旧模型保留：
 - `output/nn_full_action_32000.pt` / `_config.json`（32k 原始训练输出）
@@ -210,7 +216,7 @@ HybridNNBeliefAgent(
   - 训练数据：16000 局纯 `BeliefExpectimaxAgent` 搜索轨迹（734073 样本）
   - 蒸馏设置：α=0.5，T=8，β=0.3，λ_dealin=0.5
 
-当前 best **Hybrid-FullAction-32k** 在 2000 局公平 pool 中胜率 **33.8%**、点炮 **16.8%**、Elo **1680**。
+当前 best **Hybrid-FullAction-32k** 在 2000 局公平 pool 中胜率 **33.8%**、点炮 **16.8%**、Elo **1680**。128k BC 和 outcome-level DPO 都未超过它；下一步建议尝试 **加权 BC / filtered BC / Best-of-N**（见 §11.2、11.3、11.5）。
 
 备份：
 - `output/nn_conv_bc_beliefexp_trace_8000_big_t8.pt` / `..._config.json`（上一版本候选）
@@ -239,6 +245,9 @@ HybridNNBeliefAgent(
 
 | 文件 | 说明 |
 |---|---|
+| `output/nn_full_action_data_128000.npz` | 128k 局完整动作空间 BC 数据（~547万 discard / ~1681万 response 样本） |
+| `output/nn_full_action_data_32000.npz` | 32k 局完整动作空间 BC 数据（当前 best `nn_full_action_best.pt` 来源） |
+| `output/nn_full_action_128000_epoch_{N}.pt` | 128k BC 每 epoch checkpoint（含 optimizer state，可 `--resume`） |
 | `output/nn_training_data_selfplay_baseline_rollout_2000.npz` | 25569 条 2000 局 baseline rollout 数据（当前 best 来源） |
 | `output/nn_training_data_selfplay_baseline_rollout_1000.npz` | 12835 条 1000 局 baseline rollout 数据 |
 | `output/nn_training_data_mc.npz` | 46k 历史 MC 数据（BeliefExp + eval0 rollout） |
@@ -365,6 +374,10 @@ bash scripts/benchmark_4gpu.sh 400 4
 | `scripts/rl/train_ppo.py` | PPO 训练主脚本（warm-start/`--init`、`--n-opponents/--opponents`、`--draw-reward`、熵退火、每 iter checkpoint） |
 | `algo/agents/ppo_agent.py` | 加载 PPO 权重的对战 agent（合法 argmax，~1 ms/步，兼容 tournament） |
 | `scripts/rl/benchmark_pool.py` | 任意 4 agent 同一 pool 比 Elo（避免跨 run 漂移）；`benchmark_rl.py`、`sanity_selfplay.py` |
+| `algo/agents/opp_defensive_agent.py` | 用对手听牌概率放大 deal-in head 惩罚的纯前馈 agent（`oppdef` token） |
+| `algo/agents/hybrid_nn_belief_opp_agent.py` | 当对手听牌概率高时提前切 BeliefExp 的 Hybrid agent（`hybridopp` token） |
+| `algo/agents/danger_aware_agent.py` | 用 tile danger 预测模型防御重排的纯前馈 agent（`danger` token） |
+| `scripts/rl/run_ablation_study.py` | 对当前最强 pipeline 做减法消融，输出 `docs/reports/ablation_report.md` |
 
 **常用命令**（base 环境，`PYTHONPATH=. python3`）：
 ```bash
@@ -387,3 +400,76 @@ SEATS="ppo:C:output/nn_rl_ppo_C.pt,beliefexp,baseline,v3nnpc" \
 8. **benchmark 必须 `torch.set_num_threads(1)`**（`benchmark_pool.py` 已设）：多进程 fork 后 torch 线程过度订阅会让 benchmark 慢几十倍。Elo 在小样本/相近对手下不可信，**以胜率为准**，且要同一 pool（Elo 跨 run 漂移）。
 9. **进一步压榨 conv-BC 均失败（纯前馈天花板）**：对手式 PPO 精调退化（convFT 18.8% < convBC 22.0%）；花色置换增广（`pretrain_bc.py::_suit_perms`，6×）修复过拟合但 val acc 仍 0.711、实战持平。BC ≈ 教师(eval2) ≈ Baseline/BeliefExp。
 10. **突破天花板：NN + BeliefExp Hybrid + Search Trace Distillation**。用纯 `BeliefExpectimaxAgent` 当教师，对 `TileConvNet` 做 search trace distillation（soft target，T=4），8000 局数据 + 128/6/512 大网络得到 `output/nn_conv_bc_beliefexp_trace_8000_big_t4.pt`，组装成 `Hybrid-BE8k_t4` 后在 2000 局公平池胜率 25.7%、点炮 15.5%、Elo 1567，成为新的当前最强配置。详见 `docs/designs/conv-bc-roadmap.md`。
+
+---
+
+## 11. Offline RL / DPO 候选方案（128k 数据后的下一步）
+
+PPO 在 128k checkpoint 上发散，说明 **online self-play RL 当前不稳定**。下一步可尝试 **offline RL**，直接在已有 128k BC 数据或 tournament 数据上做策略优化，避免在线采样的分布漂移。
+
+### 11.1 方案 A：DPO（Direct Preference Optimization）
+
+**思路**：把 128k 数据或自对弈 tournament 结果转成「偏好对」`(state, chosen_action, rejected_action)`，用 DPO loss 让模型更愿意选能带来更好结局的动作。
+
+**偏好对构造方式（按复杂度）**：
+1. **Outcome-level**：同一局里，最终赢家的动作 > 输家的动作；或按最终排名给每个动作打 reward，再 pair。
+2. **Action-level**：对同一状态，用当前 BC 模型采样多个候选，用 fast value/搜索评估哪个更好，构造 preferred/rejected。
+3. **Self-play pair**：让 BC 模型和另一个模型对打，收集轨迹后用比赛结果生成 pair。
+
+**优点**：不需要训练 reward model，实现相对简单；天然与 BC 初始化兼容。
+**风险**：偏好对质量决定一切；如果 pair 本身噪声大（麻将方差大），会训偏。
+
+### 11.2 方案 B：Reward-Weighted BC / RWR
+
+**思路**：给 128k 数据里的每个样本赋权，权重 = `exp(β * normalized_return)`，然后做加权 BC。
+
+- 可用最终对局得分、排名、或手搓 heuristics（如是否点炮、是否和牌）作为 return。
+- 超参 β 控制保守/激进：β=0 就是普通 BC；β 大则只保留高回报样本。
+
+**优点**：几乎不改动训练代码，只是把 `CrossEntropyLoss` 改成 weighted。
+**风险**：128k 数据来自 BC 模型自身，return 分布可能很窄，权重后容易过拟合到少数“赢的轨迹”。
+
+### 11.3 方案 C：Filtered BC / BC-Best
+
+**思路**：过滤出“高质量”子集再训练。
+
+- 只保留最终和牌/获胜玩家的决策样本；
+- 或过滤掉明显错误样本（如点炮前的弃牌、被和时的弃牌）。
+
+**优点**：最简单；如果 128k 里有大量低质量样本，filtering 可能比加数据更有效。
+**风险**：BC 数据来自模型自身，输赢不完全由当前动作决定，filtering 可能丢掉很多正常样本。
+
+### 11.4 方案 D：Offline Actor-Critic（IQL / CQL 风格）
+
+**思路**：用 128k 数据训练 Q 函数或 V 函数，再用 policy extraction 得到策略。
+
+- 对每个 `(state, action, final_return)` 样本训练 Q(s,a)；
+- 用 advantage-weighted regression（AWR/IQL）提取 policy。
+
+**优点**：理论上能利用 return 信号直接优化长期收益。
+**风险**：动作空间大（discard 34 + response 4），需要大量数据；实现复杂度明显高于 BC/DPO；容易过拟合到离线数据。
+
+### 11.5 方案 E：Rejection Sampling / Best-of-N Distillation
+
+**思路**：对 128k 数据里的每个状态，用当前 BC 模型采样 N 个候选动作，用快速 evaluator（如 `algo.select` 或 conv-BC value）选出最佳，再用这些 best 样本 fine-tune BC。
+
+**优点**：不需要 reward model 或偏好对，直接 distillation；N 越大越接近“搜索增强版 BC”。
+**风险**：速度较慢（每个状态要评估 N 次）；如果 evaluator 不准，蒸馏对象就有偏差。
+
+### 11.6 2026-07 调研结论与执行计划
+
+2026-07 中旬又做了一次广义棋牌 AI 调研（不限于麻将），主要结论：
+
+- **稀疏 reward 是最大瓶颈**：Suphx、Tjong、Evo-Sparrow 等都强调 reward shaping / fan-backward / 全局 reward 预测，而不是直接用 ±1 终局信号做 DPO/PPO。
+- **KTO 比 DPO 更适合二元反馈**：KTO 只需要每个样本标“好/坏”，不需要配对，对麻将这种高方差场景更友好。
+- **对手建模仍是麻将核心**：SIMCAT、Suphx、OMIS（NeurIPS 2024）都显示，准确推断对手手牌/听牌状态能显著降低点炮率。
+- **进化策略 / 搜索蒸馏是可行替代**：Evo-Sparrow 用 CMA-ES 优化 LSTM 权重避开梯度崩溃；Suphx 用运行时搜索+蒸馏把搜索能力注入 NN。
+
+**已决定同时启动两条路线**：
+
+1. **A. Reward shaping + KTO**：在现有 128k 数据上，把 win/loss/draw 作为二元反馈，用 KTO loss 微调完整动作 policy。预期快速验证“KTO 是否比 DPO 更稳”。后续若有效，再加入 shanten/ukeire 等 shaped reward。
+2. **C. 对手建模**：生成新的自对弈数据，记录每个决策点所有对手的隐藏手牌和听牌状态，训练一个**对手听牌/手牌预测**的辅助网络；最终接入 belief 更新或 NN 的额外输入。
+
+**不再优先**：跨状态 outcome-level DPO（已验证无效）、PPO 在线自对弈（已发散）。备选：Evo-Sparrow 式 CMA-ES、Suphx 式运行时搜索蒸馏。
+
+**建议先快速验证 B 和 C**（各 1–2 小时），如果有效再尝试 DPO；D 作为长期备选。

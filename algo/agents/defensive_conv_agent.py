@@ -26,9 +26,9 @@ class DefensiveConvAgent(PPOAgent):
         self.beta = float(os.environ.get('DEALIN_BETA', '2.0'))
 
     def next(self):
-        assert len(self.cur) == 14
+        assert len(self.cur) >= 1
         net = self._net_obj()
-        feats = self._extract(self.context, self.cur, self.name)
+        feats = self._extract(self.context, self.full_hand(), self.name)
         x = torch.from_numpy(np.asarray(feats, dtype=np.float32)).unsqueeze(0).to(self.device)
         with torch.no_grad():
             out = net(x)

@@ -280,15 +280,133 @@ DetMCTS + NN value 截断已快速验证：400 局 benchmark Elo 仅 **1315**，
 - 若必须纯前馈：用 `output/nn_conv_bc_dealin_2000_l07.pt`；
 - 继续同方向 bootstrap 已收敛，再提升需更大网络、更强教师或动作空间改造。
 
-**当前候选**（2026-07-05）：
-- **当前最佳（最稳健）**：`hybrid:BE16k_t8:output/nn_conv_bc_beliefexp_trace_16000_big_t8.pt:beliefexp`（2000 局胜率 25.8%，点炮 16.3%，Elo 1581）
-- 上一版本候选：`hybrid:BE8k_t8:output/nn_conv_bc_beliefexp_trace_8000_big_t8.pt:beliefexp`
-- 上一代稳健候选：`hybrid:hybridBase:output/nn_conv_bc_hybrid_2000.pt:beliefexp`
-- 胜率优先的 Hybrid：`hybrid:dealin07:output/nn_conv_bc_dealin_2000_l07.pt:beliefexp`
-- 纯前馈首选：`output/nn_conv_bc_dealin_2000_l07.pt`
+**当前候选**（2026-07-05 及 128k 实验后）：
+- **当前最佳（完整动作空间）**：`Hybrid-FullAction-32k`（`output/nn_full_action_best.pt` + `_config.json`， belief_kind='beliefexp'）
+  - 200 局 vs old best `Hybrid-BE16k_t8`：胜率 40.5%，Elo 1601，点炮 15.0%
+  - 400 局公平 pool：胜率 33.8%，Elo 1680，点炮 16.8%
+- 上一版本稳健候选：`hybrid:BE16k_t8:output/nn_conv_bc_beliefexp_trace_16000_big_t8.pt:beliefexp`（Elo 1581）
+- 128k 未确认候选：`output/nn_full_action_128000_epoch_07.pt`（Elo ~1621，需更大局数验证）
 - 胜率上限：`BeliefExpectimaxAgent`
 - 基线：`output/nn_conv_bc.pt`
 
+---
+
+## 6.5 完整动作空间 128k 缩放 + PPO 微调（2026-07）
+
+在 `Hybrid-FullAction-32k` 基础上，把训练数据从 32k 局放大到 **128k 局**，并尝试用 PPO 在 128k checkpoint 上继续微调。
+
+**128k 行为克隆**：
+- 数据：`output/nn_full_action_data_128000.npz`（128k 局，~547万 discard / ~1681万 response 样本）。
+- 模型：`TileConvNet` 128/6/512，带 dealin/value/tenpai/response head。
+- 训练：从 `output/nn_full_action_best.pt` 热启，30 epoch，3 GPU DataParallel；脚本已支持每 epoch checkpoint + `--resume`。
+- 结果：
+  - Epoch 1 val disc_acc **0.9444**；
+  - 后续 29 epoch **完全 plateau**，loss/acc 几乎不变；
+  - Epoch 1 Elo **1601**，Epoch 7 Elo **1621**（128k 里最高），Epoch 30 Elo **1566**。
+- 结论：**单纯放大 BC 数据到 128k 没有稳定收益**，最终模型反而不如中间 epoch。
+
+**PPO 在 128k checkpoint 上微调**：
+- 从 128k Epoch 2 启动，GPU0，10 iter × 100 局自对弈。
+- 发散：entropy 从 0.06 涨到 **0.595**，KL 连续 early-stop；vs frozen 胜率仅 **4.3%**。
+- 产物 `output/nn_full_action_ppo_128k.pt`；benchmark Elo **1424**，比初始化 checkpoint 弱约 180 分。
+- 结论：**当前 PPO 超参不适合在强 BC 初始化上继续优化**。
+
+**DPO（完整动作，outcome-level 偏好对）**：
+- 实现 `scripts/rl/train_full_action_dpo.py`；从 32k best 热启，用 128k 数据里的 `v_discard/v_response` 构造赢-vs-输偏好对。
+- 10 epochs，β=0.1，lr=5e-5；discard DPO acc 从 0.656 提到 0.717，response 几乎没动（0.055）。
+- Benchmark（200 局）：DPO Elo **1333**，胜率 5.0%，点炮 26.0%；明显弱于 BC32k（1612）和 PPO（1596）。
+- 结论：**跨状态 outcome-level 偏好对不适合当前数据**，DPO 学到区分样本但没学到更强策略。
+
+**当前状态**：best 仍为 `Hybrid-FullAction-32k`（`output/nn_full_action_best.pt`）；128k Epoch 7 是未确认的候选。DPO 已验证无效。根据 2026-07 中旬广义棋牌 AI 调研，**同时启动两条路线**：
+1. **A. Reward shaping + KTO**：用 KTO（二元反馈，无需配对）替代 DPO，在 128k 数据上微调完整动作 policy；
+2. **C. 对手建模**：生成带对手隐藏状态的新自对弈数据，训练对手听牌/手牌预测网络，接入 belief/NN。
+
+---
+
+## 6.6 KTO / 对手建模验证结果（2026-07-04）
+
+### A. KTO 实验：阴性
+
+实现 `scripts/rl/train_full_action_kto.py`，用 128k 完整动作数据的 `v_discard/v_response` 做二元反馈（reward > 0 desirable，reward < 0 undesirable）：
+
+- **主实验**（GPU0，β=0.1，λ_D=1，λ_U=2）：KL reference point `z0` 从 6.8 发散到 8.4，discard 没有 desirable 样本（d_acc=0），loss 进入饱和区，无有效学习。
+- **消融**（GPU2 β=0.5；GPU3 bc_weight=0.1）：`z0` 稳定但 desirable 准确率仅 0.06–0.08，提升极慢。
+- **根因**：`v_discard/v_response` 只是每局最终 seat reward（+1/-1），不是动作级价值；正样本仅占 ~25%，信号太弱、噪声太大。
+- **结论**：outcome-level KTO 走不通；若再做离线 RL，必须先获得**动作级价值估计**（MC rollout、value net、或 shaped reward）。
+
+### C. 对手建模：已接入，效果有限
+
+实现 `scripts/rl/gen_opponent_data.py` 与 `scripts/rl/train_opponent_model.py`，生成 16k 局数据（68.5 万 snapshots），训练 MLP/Conv 对手听牌预测器：
+
+- MLP 256/128：val_acc **0.840**；MLP 512/256/128：0.843；Conv：0.842。
+- 基线（常数预测多数类）0.826，模型仅略高。
+
+#### 接入方式 1：OppDefensiveAgent
+
+`algo/agents/opp_defensive_agent.py`：在 deal-in head 惩罚上再乘以对手听牌概率（`oppdef` token）。
+
+- 400 局 pool（vs PPO-base / Defensive / Baseline）：
+  - PPO-base：win 10.8%，deal-in 18.8%，Elo 1566
+  - OppDef：win 8.5%，deal-in 17.0%，Elo 1367
+  - Defensive（deal-in only）：win 9.5%，deal-in 21.0%，Elo 1438
+- **结论**：deal-in head 惩罚本身就会让纯 policy 变弱；再叠加对手信号无净收益。
+
+#### 接入方式 2：HybridNNBeliefOppAgent
+
+`algo/agents/hybrid_nn_belief_opp_agent.py`：当对手听牌概率超阈值时，提前把 Hybrid 从 NN policy 切换到 BeliefExp 搜索（`hybridopp` token）。
+
+- 400 局 pool（vs Hybrid / Baseline / V3-NN-PC）：
+  - Hybrid：win 34.2%，deal-in 16.8%，Elo 1506
+  - HybridOpp：win 33.2%，deal-in 17.0%，Elo 1612
+- 胜率基本打平，Elo 因 pairwise 计算波动；未观察到稳健提升。
+
+#### 总体结论
+
+- 当前对手模型准确率不足（只比常数预测高 ~1.5%），无法提供足够强的额外信号。
+- 两种接入方式都**没有超越现有 Hybrid-FullAction-32k**。
+- 若继续对手建模，需：① 大幅提升准确率（目标 >0.90）；② 预测对手具体待牌/花色偏好，而不只是“是否听牌”；③ 或直接把对手特征作为 NN policy 的额外输入并重新训练（数据需重新生成）。
+
+### A2. 动作级价值 + Advantage-Weighted BC（AWBC）：Hybrid 内有微弱阳性
+
+实现 `scripts/rl/train_full_action_awbc.py`：
+
+1. 用 `output/nn_value_model_mc.pt` 估计每个样本决策前状态的价值 `V(s)`；
+2. 用最终 seat reward `R` 计算优势 `A = R - V(s)`；
+3. 只保留 `A >= min_adv` 的样本，并以 `exp(A / τ)` 加权做 BC 微调。
+
+**训练配置 v1**：`--weight-temp 1.0 --min-adv -0.2 --bc-weight 0.1`，10 epoch，GPU0。  
+**训练配置 v2**：`--weight-temp 0.5 --min-adv 0.0 --bc-weight 0.0`（更激进加权）。
+
+**结果**：
+
+| 配置 | pool | win | deal-in | Elo |
+|---|---|---|---|---|
+| Hybrid-hyb | vs baseline/v3nnpc | 34.2% | 16.8% | 1506 |
+| Hybrid-awbc v1 | 同上 | 33.2% | 17.0% | 1612 |
+| Hybrid-hyb | 800 局 | 34.2% | 16.6% | 1542 |
+| Hybrid-awbc v1 | 800 局 | 33.2% | 17.8% | 1597 |
+| Hybrid-hyb | ablation pool | 35.0% | 18.0% | 1653 |
+| Hybrid-awbc v2 | ablation pool | 29.5% | 19.8% | 1515 |
+
+- v1 在 800 局与 base 基本打平，Elo 略高；v2 在 ablation pool 中略差。
+- 纯 PPO 形态中 AWBC 显著降低点炮（24.0% → 19.5%），但胜率不变。
+- **结论**：AWBC 是可行的动作级价值利用方式，但当前 value net 质量限制了上限；**未形成统计显著超越**。
+
+---
+
+## 6.7 减法消融报告（2026-07-04）
+
+为系统理解哪些改进真正有效，运行了针对 `Hybrid-FullAction-32k` 的减法消融实验：每个 pool 400 局、anchor 固定，量化各组件贡献。
+
+详见 **`docs/reports/ablation_report.md`**。关键结论：
+
+1. **BeliefExp 搜索是最大正收益**：去掉搜索后纯 NN policy 胜率下降 32.2%。
+2. **完整动作空间 response head 贡献第二**：full-action policy 比纯 conv-BC 高约 22 个百分点。
+3. **deal-in head 对 Hybrid 胜率无贡献**：在「NN + BeliefExp」中搜索已提供足够防守。
+4. **数据缩放天花板**：32k 后 128k 无稳定收益。
+5. **可删除的组件**：128k 继续训练、对手建模、DPO/PPO/KTO、AWBC（未确认）。
+
+三个后续突破方向的详细分析与历史对照，见 **`docs/reports/future_directions_analysis.md`**。
 
 ---
 
@@ -300,10 +418,10 @@ DetMCTS + NN value 截断已快速验证：400 局 benchmark Elo 仅 **1315**，
 - NN + BeliefExp Hybrid：阳性（实用最强框架）；
 - Bootstrap 两代：一代阳性、二代收敛。
 
-继续提升的三个候选方向（按推荐顺序）：
+继续提升的候选方向（按推荐顺序，2026-07 更新）：
 
-1. **增大网络容量**：conv-BC 当前仅 ~82k 参数，尝试 channels=128/192、n_blocks=6/8、hidden=512；工作量小，可快速验证是否容量受限。
-2. **多任务蒸馏 policy + value + BeliefExp 搜索轨迹**：记录教师对每个候选的评分作为 soft target，并用 BeliefExp 连续 value 估计监督 value head；工作量中等，可能提升 pure NN 对 Hybrid 的逼近能力。
-3. **动作空间 / 规则层面改造**：把报听/吃碰杠纳入 policy，或引入 attack/balance/defense mode 的 Hierarchical Policy，或增加更丰富的对手模型特征；工作量最大，但潜在收益最高。
+1. **Offline RL / DPO / 加权 BC**：PPO 在线自对弈在强 BC 初始化上发散，下一步优先尝试离线方法（DPO、reward-weighted BC、filtered BC、Best-of-N distillation），利用已有 128k 数据做策略优化。
+2. **更大网络 / 更强教师 / 特征改造**：若 offline RL 无效，再考虑容量或特征空间。
+3. **动作空间 / 规则层面改造**：已纳入完整动作空间（吃/碰/杠/胡），但可进一步 hierarchical policy 或对手建模。
 
-**当前执行方向**：C（动作空间/规则改造），从最小可行改造开始。
+**当前执行方向**：1（A. Reward shaping + KTO）与 2（C. 对手建模）并行启动。

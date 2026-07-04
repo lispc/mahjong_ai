@@ -2,11 +2,26 @@
 """通用 pool benchmark：把任意 4 个 agent 放同一 tournament，避免跨 run 的 Elo 漂移。
 
 座位通过环境变量 SEATS 指定，逗号分隔，每个 token：
-    baseline | beliefexp | v3nnpc | ppo:<label>:<model_path>
+    baseline | beliefexp | v3nnpc
+    | ppo:<label>:<model_path>
+    | defensive:<label>:<model_path>
+    | oppdef:<label>:<model_path>:<opp_model_path>
+    | danger:<label>:<model_path>:<danger_model_path>
+    | hybrid:<label>:<model_path>[:<belief_kind>]
+    | hybridopp:<label>:<model_path>[:<opp_model_path>]
+
+环境变量：
+    DEALIN_BETA          defensive/oppdef 点炮惩罚系数（默认 2.0）
+    OPP_BETA             oppdef 听牌概率放大系数（默认 2.0）
+    DANGER_BETA          danger 模型惩罚系数（默认 2.0）
+    OPP_TENPAI_THRESHOLD hybridopp 触发 BeliefExp 的听牌阈值（默认 0.5）
+    OPP_MODEL_PATH       oppdef/hybridopp 默认对手模型路径
+    DANGER_MODEL_PATH    danger 默认 danger 模型路径
 
 例：
-    SEATS="ppo:v1:output/nn_rl_ppo_selfplay_v1.pt,ppo:A:output/nn_rl_ppo_A.pt,\
-ppo:C:output/nn_rl_ppo_C.pt,beliefexp" \
+    SEATS="oppdef:opp:output/nn_full_action_best.pt:output/opponent_model.pt,\
+hybridopp:hybo:output/nn_full_action_best.pt:output/opponent_model.pt,\
+baseline,beliefexp" \
     PYTHONPATH=. python3 scripts/rl/benchmark_pool.py 400 32
 """
 
@@ -70,6 +85,26 @@ class AgentFactory:
             from algo.agents.defensive_conv_agent import DefensiveConvAgent
             return DefensiveConvAgent(f'Def-{self.label}', model_path=self.path,
                                       device='cpu', temperature=0.0)
+        if self.kind == 'oppdef':
+            from algo.agents.opp_defensive_agent import OppDefensiveAgent
+            # path 格式：model_path:opp_model_path（opp 默认 output/opponent_model.pt）
+            if ':' in self.path:
+                model_path, opp_path = self.path.split(':', 1)
+            else:
+                model_path, opp_path = self.path, None
+            return OppDefensiveAgent(f'OppDef-{self.label}', model_path=model_path,
+                                     opp_model_path=opp_path,
+                                     device='cpu', temperature=0.0)
+        if self.kind == 'danger':
+            from algo.agents.danger_aware_agent import DangerAwareAgent
+            # path 格式：model_path:danger_model_path
+            if ':' in self.path:
+                model_path, danger_path = self.path.split(':', 1)
+            else:
+                model_path, danger_path = self.path, None
+            return DangerAwareAgent(f'Danger-{self.label}', model_path=model_path,
+                                    danger_model_path=danger_path,
+                                    device='cpu', temperature=0.0)
         if self.kind == 'hybrid':
             from algo.agents.hybrid_nn_belief_agent import HybridNNBeliefAgent
             # path 格式：model_path:belief_kind（默认 beliefexp）
@@ -80,6 +115,16 @@ class AgentFactory:
             return HybridNNBeliefAgent(f'Hybrid-{self.label}', nn_model_path=model_path,
                                        belief_kind=belief_kind, device='cpu',
                                        temperature=0.0)
+        if self.kind == 'hybridopp':
+            from algo.agents.hybrid_nn_belief_opp_agent import HybridNNBeliefOppAgent
+            # path 格式：model_path:opp_model_path（opp 默认 output/opponent_model.pt）
+            if ':' in self.path:
+                model_path, opp_path = self.path.split(':', 1)
+            else:
+                model_path, opp_path = self.path, None
+            return HybridNNBeliefOppAgent(f'HybridOpp-{self.label}', nn_model_path=model_path,
+                                          opp_model_path=opp_path, device='cpu',
+                                          temperature=0.0)
         if self.kind == 'safetenpai':
             return SafetyAwarePPOAgent(f'SafeTenpai-{self.label}', model_path=self.path,
                                        device='cpu', temperature=0.0)
@@ -92,6 +137,16 @@ class AgentFactory:
             return HybridNNBeliefAgent(f'HybridSafe-{self.label}', nn_model_path=model_path,
                                        belief_kind=belief_kind, device='cpu',
                                        temperature=0.0, nn_agent_class=SafetyAwarePPOAgent)
+        if self.kind == 'hybridheur':
+            from algo.agents.hybrid_nn_belief_agent import HybridNNBeliefAgent
+            from algo.agents.ppo_agent import HeuristicResponsePPOAgent
+            if ':' in self.path:
+                model_path, belief_kind = self.path.split(':', 1)
+            else:
+                model_path, belief_kind = self.path, 'beliefexp'
+            return HybridNNBeliefAgent(f'HybridHeur-{self.label}', nn_model_path=model_path,
+                                       belief_kind=belief_kind, device='cpu',
+                                       temperature=0.0, nn_agent_class=HeuristicResponsePPOAgent)
         if self.kind == 'v3deep':
             # label = "depth-leaf"（如 "2-eval0" / "2-nn"）
             depth_s, leaf = self.label.split('-', 1)
@@ -123,10 +178,17 @@ def _make_factory(token):
     for kind, prefix in (('ppo', 'PPO-'), ('v3rlcand', 'V3-RLcand-'),
                          ('v3rlunion', 'V3-RLunion-'), ('v3deep', 'V3d-'),
                          ('adapt', 'Adapt-'), ('mctsconv', 'MCTSconv-'),
-                         ('defensive', 'Def-'), ('hybrid', 'Hybrid-'),
-                         ('safetenpai', 'SafeTenpai-'), ('hybridsafe', 'HybridSafe-'),
-                         ('be-nn', 'BE-NN-')):
+                         ('defensive', 'Def-'), ('oppdef', 'OppDef-'),
+                         ('danger', 'Danger-'), ('hybrid', 'Hybrid-'),
+                         ('hybridopp', 'HybridOpp-'), ('hybridsafe', 'HybridSafe-'),
+                         ('hybridheur', 'HybridHeur-'), ('be-nn', 'BE-NN-')):
         if token.startswith(kind + ':'):
+            if kind in ('oppdef', 'hybridopp', 'danger'):
+                parts = token.split(':', 3)
+                if len(parts) != 4:
+                    raise ValueError(f'{kind} token needs 4 parts: {token}')
+                _, label, path, extra_path = parts
+                return AgentFactory(kind, label=label, path=f'{path}:{extra_path}'), f'{prefix}{label}'
             _, label, path = token.split(':', 2)
             return AgentFactory(kind, label=label, path=path), f'{prefix}{label}'
     raise ValueError(token)

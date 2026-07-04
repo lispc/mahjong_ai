@@ -137,6 +137,8 @@ def main():
                     help='use nn.DataParallel if multiple GPUs available (1=auto, 0=force single)')
     ap.add_argument('--num_workers', type=int, default=4,
                     help='DataLoader CPU workers for training loaders')
+    ap.add_argument('--resume', type=str, default='',
+                    help='resume from a per-epoch checkpoint (.pt)')
     args = ap.parse_args()
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -201,12 +203,30 @@ def main():
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.wd)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
+    start_epoch = 1
     best_disc_acc = 0.0
     best_state = None
     best_cfg = cfg.copy()
 
+    if args.resume:
+        print(f'Resuming from {args.resume}')
+        ckpt = torch.load(args.resume, map_location=device, weights_only=False)
+        base_model(model).load_state_dict(ckpt['model_state'])
+        if 'optimizer_state' in ckpt:
+            optimizer.load_state_dict(ckpt['optimizer_state'])
+        start_epoch = ckpt.get('epoch', 0) + 1
+        best_disc_acc = ckpt.get('best_disc_acc', 0.0)
+        best_state = ckpt.get('best_state', None)
+        if best_state is not None:
+            best_state = {k: v.to(device).clone() for k, v in best_state.items()}
+        if 'config' in ckpt:
+            cfg = ckpt['config']
+            best_cfg = cfg.copy()
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=max(1, args.epochs - start_epoch + 1))
+
     t0 = time.time()
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(start_epoch, args.epochs + 1):
         model.train()
         epoch_disc_loss = 0.0
         epoch_resp_loss = 0.0
@@ -270,14 +290,27 @@ def main():
 
         if disc_acc > best_disc_acc:
             best_disc_acc = disc_acc
-            best_state = model.state_dict()
+            best_state = {k: v.to(device).clone() for k, v in base_model(model).state_dict().items()}
             best_cfg = cfg.copy()
+
+        # 每 epoch 保存 checkpoint，方便中断/恢复
+        epoch_path = args.out_model.replace('.pt', f'_epoch_{epoch:02d}.pt')
+        torch.save({
+            'model_state': base_model(model).state_dict(),
+            'optimizer_state': optimizer.state_dict(),
+            'epoch': epoch,
+            'best_disc_acc': best_disc_acc,
+            'best_state': best_state,
+            'config': cfg,
+        }, epoch_path)
+        with open(epoch_path.replace('.pt', '_config.json'), 'w') as f:
+            json.dump(cfg, f, indent=2)
 
     dt = time.time() - t0
     print(f'Training finished in {dt:.1f}s, best val disc_acc {best_disc_acc:.4f}')
 
     if best_state is not None:
-        model.load_state_dict(best_state)
+        base_model(model).load_state_dict(best_state)
 
     out_cfg_path = args.out_model.replace('.pt', '_config.json')
     with open(out_cfg_path, 'w') as f:

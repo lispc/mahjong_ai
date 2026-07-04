@@ -169,7 +169,7 @@ def _tenpai_check(current, locked_names, locked, event_log, record_log,
 
 
 def play_game(agents, tile_pool_cls=None, verbose=False, record_time=False,
-              record_log=False):
+              record_log=False, state_callback=None):
     """
     Play one game with four agents.
 
@@ -263,6 +263,14 @@ def play_game(agents, tile_pool_cls=None, verbose=False, record_time=False,
         else:
             # 碰后直接进入打牌，不摸牌
             skip_draw = False
+
+        if state_callback is not None:
+            state_callback(agents, turn, 'decision', {
+                'drawn': drawn,
+                'skip_draw': skip_draw,
+                'locked_names': set(locked_names),
+                'wall_remaining': wall_remaining(),
+            })
 
         discarded, dt, locked = _discard_step(
             current, drawn if not skip_draw else None, locked_names,
