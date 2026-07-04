@@ -67,12 +67,18 @@ def load_value_model(model_path, device):
 
 
 @torch.no_grad()
-def compute_values(net, X, batch_size, device):
+def compute_values(net, X, batch_size, device, value_is_policy=False):
     net.eval()
     vals = []
     for i in range(0, len(X), batch_size):
         xb = torch.from_numpy(X[i:i+batch_size]).float().to(device)
-        v = net(xb)
+        out = net(xb)
+        if value_is_policy:
+            v = out[1] if isinstance(out, tuple) else out
+        else:
+            v = out
+        if v.dim() > 1:
+            v = v.squeeze(-1)
         vals.append(v.cpu().numpy())
     return np.concatenate(vals, axis=0).astype(np.float64)
 
@@ -148,6 +154,8 @@ def main():
     ap.add_argument('policy_path')
     ap.add_argument('value_path')
     ap.add_argument('out_model')
+    ap.add_argument('--value-is-policy', action='store_true',
+                    help='value_path 是与 policy 同架构的模型（如 value head 微调后的 full-action model）')
     ap.add_argument('--epochs', type=int, default=10)
     ap.add_argument('--batch', type=int, default=4096)
     ap.add_argument('--lr', type=float, default=5e-5)
@@ -172,14 +180,19 @@ def main():
     print(f'Loading policy from {args.policy_path}')
     policy, cfg = load_policy_model(args.policy_path, device)
     print(f'Loading value net from {args.value_path}')
-    value_net, vcfg = load_value_model(args.value_path, device)
+    if args.value_is_policy:
+        value_net, _ = load_policy_model(args.value_path, device)
+    else:
+        value_net, vcfg = load_value_model(args.value_path, device)
     for p in value_net.parameters():
         p.requires_grad = False
 
     print('Computing state values ...')
     t0 = time.time()
-    Vd = compute_values(value_net, Xd, args.batch * 4, device)
-    Vr = compute_values(value_net, Xr, args.batch * 4, device)
+    Vd = compute_values(value_net, Xd, args.batch * 4, device,
+                        value_is_policy=args.value_is_policy)
+    Vr = compute_values(value_net, Xr, args.batch * 4, device,
+                        value_is_policy=args.value_is_policy)
     print(f'  discard V mean={Vd.mean():.3f} std={Vd.std():.3f}')
     print(f'  response V mean={Vr.mean():.3f} std={Vr.std():.3f}')
     print(f'  done in {time.time()-t0:.1f}s')
