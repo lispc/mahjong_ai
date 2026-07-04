@@ -29,7 +29,18 @@ from algo.agents.alphazero_mcts_agent import AlphaZeroMCTSAgent
 
 
 def play_one_game(seed, model_path, n_worlds, n_sims, max_depth, device):
-    import random, numpy as np
+    import os, random, numpy as np
+    # 避免多 worker 同时跑时 OpenMP/MKL 线程过度订阅
+    os.environ.setdefault('OMP_NUM_THREADS', '1')
+    os.environ.setdefault('MKL_NUM_THREADS', '1')
+    os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
+    os.environ.setdefault('VECLIB_MAXIMUM_THREADS', '1')
+    os.environ.setdefault('NUMEXPR_NUM_THREADS', '1')
+    try:
+        import torch
+        torch.set_num_threads(1)
+    except Exception:
+        pass
     random.seed(seed)
     np.random.seed(seed % 2**32)
     mcts = AlphaZeroMCTSAgent('P0', model_path=model_path,
