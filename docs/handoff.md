@@ -423,8 +423,10 @@ value head 微调产物：`output/nn_full_action_valueft.pt`（val_mse 0.6758）
 
 1. **MCTS self-play 生成 trace**：`scripts/rl/gen_alphazero_data.py`  
    - 用 `AlphaZeroMCTSAgent` 对当前 best policy 做 determinized PUCT；
-   - 每步记录 `(features, visit_distribution, game_outcome)`；
-   - 参数示例：`n_worlds=4, n_sims=16, max_depth=2`，约 7 min/局。
+   - 每步记录 `(features, visit_distribution, value_target)`；
+   - value target 默认改为**该局最终 outcome**（P0 赢 +1 / 输 -1 / 流局 0），而不是搜索根节点的内部 value；
+   - 已加入 checkpoint/resume：每 50 局保存 `.checkpoint.npz`，崩溃后可 `--resume` 续跑；
+   - 参数示例：`n_worlds=4, n_sims=16, max_depth=2`，单局约 4 min（4 workers 下 200 局约 3.5 h）。
 
 2. **在 trace 上训练 policy + value**：`scripts/rl/train_alphazero.py`  
    - policy：用 visit distribution 做 soft target；
@@ -434,15 +436,16 @@ value head 微调产物：`output/nn_full_action_valueft.pt`（val_mse 0.6758）
 3. **benchmark 新模型**，若胜率提升则替换 best，再进入下一轮。
 
 **当前状态**：
-- Agent/数据/训练脚本已 commit。
-- 200 局真实 trace 已在后台生成（`output/alphazero_trace_200.npz`，GPU1）。
-- 完成后训第一个 AZ model：`output/nn_full_action_az.pt`。
+- Agent/数据/训练/自动 monitor 脚本已 commit。
+- 200 局真实 trace 正在 GPU1 后台生成（`output/alphazero_trace_200.npz`），使用 valueft 作为基线 policy；完成后由 `scripts/rl/wait_and_train_az.py` 自动在 GPU0 训练第一个 AZ model：`output/nn_full_action_az.pt`。
+- 下一迭代应使用新版本脚本（`--value-target outcome --resume`）生成 trace，以获取更稳定的 value 标签。
 
-**生成命令**：
+**生成命令（新版）**：
 ```bash
 CUDA_VISIBLE_DEVICES=1 PYTHONPATH=. python3 scripts/rl/gen_alphazero_data.py \
     output/nn_full_action_valueft.pt output/alphazero_trace_200.npz 200 4 \
-    --n-worlds 4 --n-sims 16 --max-depth 2 --device cuda
+    --n-worlds 4 --n-sims 16 --max-depth 2 --device cuda \
+    --value-target outcome --resume
 ```
 
 **训练命令**：
@@ -450,6 +453,14 @@ CUDA_VISIBLE_DEVICES=1 PYTHONPATH=. python3 scripts/rl/gen_alphazero_data.py \
 CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. python3 scripts/rl/train_alphazero.py \
     output/alphazero_trace_200.npz output/nn_full_action_data_128000.npz \
     output/nn_full_action_best.pt output/nn_full_action_az.pt
+```
+
+**自动训练 monitor**：
+```bash
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. python3 scripts/rl/wait_and_train_az.py \
+    output/alphazero_trace_200.npz output/nn_full_action_data_128000.npz \
+    output/nn_full_action_best.pt output/nn_full_action_az.pt \
+    output/wait_and_train_az_200.log
 ```
 
 ---
