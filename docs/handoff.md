@@ -417,56 +417,68 @@ value head 微调产物：`output/nn_full_action_valueft.pt`（val_mse 0.6758）
 
 ---
 
-## 6.8 AlphaZero MCTS 迭代管线（已完成第一轮，2026-07-05）
+## 6.8 AlphaZero MCTS 迭代管线（已完成三轮 bootstrap，均未超越 base）
 
 为实现「search → stronger value/policy → stronger search」的迭代，建立 AlphaZero 风格管线：
 
 1. **MCTS self-play 生成 trace**：`scripts/rl/gen_alphazero_data.py`  
    - 用 `AlphaZeroMCTSAgent` 对当前 best policy 做 determinized PUCT；
    - 每步记录 `(features, visit_distribution, value_target)`；
-   - value target 默认改为**该局最终 outcome**（P0 赢 +1 / 输 -1 / 流局 0），而不是搜索根节点的内部 value；
-   - 已加入 checkpoint/resume：每 50 局保存 `.checkpoint.npz`，崩溃后可 `--resume` 续跑；
-   - 参数：`n_worlds=4, n_sims=16, max_depth=2`，16 workers 下 200 局约 **50 min**。
+   - 已加入 checkpoint/resume：每 50 局保存 `.checkpoint.npz`。
 
 2. **在 trace 上训练 policy + value**：`scripts/rl/train_alphazero.py`  
    - policy：用 visit distribution 做 soft target；
-   - value：用 trace 中的 outcome 做 MSE；
-   - 同时保留 response head 的 BC；
-   - 60 epoch 约 **36 min**，最终 `val_policy≈1.24, val_value≈0.17, val_response≈0.002`。
+   - value：用 trace 中的 outcome 或 MCTS value 做 MSE；
+   - 同时保留 response head 的 BC。
 
 3. **benchmark 新模型**：`scripts/rl/benchmark_az_vs_base.py`。
 
-**第一轮结果（`output/nn_full_action_az.pt` vs `output/nn_full_action_best.pt`）**：
+### 三轮结果汇总
 
-| Agent | 400 局 win | self | ron | deal-in | Elo |
-|---|---|---|---|---|---|
-| Hybrid-AZ | 47.2% | 24.5% | 22.8% | 26.2% | 1419 |
-| Hybrid-Base | 52.8% | 26.5% | 26.2% | 22.8% | 1581 |
+| 轮次 | trace | value target | val_policy | 400 局 win | deal-in | Elo |
+|---|---|---|---|---|---|---|
+| v1 | 200局，n_sims=16 | outcome | 1.24 | 47.2% | 26.2% | 1419 |
+| v2 | 500局，n_sims=16 | MCTS value | 1.18 | 42.5% | 24.8% | 1423 |
+| policy-only | 200局，n_sims=16 | 不用 value | 1.21 | 47.5% | 25.0% | 1462 |
+| v3 | 500局，**n_sims=32** | MCTS value | 1.27 | 44.0% | **28.2%** | 1440 |
 
-- **未超越 base**：胜率低 5.6 pp，点炮高 3.4 pp。
-- 原因分析：200 局 trace 仅 2281 条样本，MCTS search quality 受限于 `n_sims=16 / max_depth=2`，policy target 噪音大；value target 用 outcome 方差高。
-- **结论**：第一轮 AZ bootstrap **阴性**，但管线已跑通。下一轮需要**更多/更高质量的 trace**（提升 n_sims/depth、增加局数），或改 value target 为 MCTS 内部值 / 更强的 outcome baseline。
+- 三轮 AZ 模型均**未超越 base**（`nn_full_action_best.pt`，Elo 1581）。
+- 提升 `n_sims=16 → 32` 没有改善，反而点炮率升高、胜率下降。
+- 说明当前 PUCT + eval2 rollout 的 search target 质量不足，单纯堆 sims 无法让 policy 超过教师。
+
+### 结论与下一步
+
+- **短期继续 brute-force AZ 的 ROI 低**：500 局 + n_sims=32 已花约 5 h，效果更差；再升 depth/n_sims 会进入“天量级”。
+- 可能瓶颈：
+  1. MCTS 只搜弃牌，不搜 response/tenpai 宣言；
+  2. 对手用 `eval2` rollout 过于悲观/保守，导致 search 偏好安全牌而非争胜；
+  3. 200–500 局对麻将 still 太少，AlphaZero 通常需要 10k+ 局。
+- 推荐先**暂停 AZ 迭代**，回到 `docs/reports/future_directions_analysis.md` 的另外两个方向：
+  - **方向一**：训一个 conv value net 做 search value labels（不是 outcome），再试 AZ；
+  - **方向二**：把 BeliefExp 危险信号蒸馏进 policy 输入 + deal-in head。
+
+### 常用命令备份
 
 **生成命令（16 workers）**：
 ```bash
 CUDA_VISIBLE_DEVICES=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 \
 PYTHONPATH=. python3 scripts/rl/gen_alphazero_data.py \
-    output/nn_full_action_valueft.pt output/alphazero_trace_200.npz 200 16 \
-    --n-worlds 4 --n-sims 16 --max-depth 2 --device cuda \
-    --value-target outcome --resume
+    output/nn_full_action_valueft.pt output/alphazero_trace_500_mctsvalue.npz 500 16 \
+    --n-worlds 4 --n-sims 32 --max-depth 2 --device cuda \
+    --value-target mcts --resume
 ```
 
 **训练命令**：
 ```bash
 CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. python3 scripts/rl/train_alphazero.py \
-    output/alphazero_trace_200.npz output/nn_full_action_data_128000.npz \
-    output/nn_full_action_best.pt output/nn_full_action_az.pt
+    output/alphazero_trace_500_mctsvalue.npz output/nn_full_action_data_128000.npz \
+    output/nn_full_action_best.pt output/nn_full_action_az_mctsvalue.pt
 ```
 
 **快速 benchmark 命令**：
 ```bash
-CUDA_VISIBLE_DEVICES=1 PYTHONPATH=. python3 scripts/rl/benchmark_az_vs_base.py \
-    output/nn_full_action_az.pt 400 16 --device cuda
+CUDA_VISIBLE_DEVICES=2 PYTHONPATH=. python3 scripts/rl/benchmark_az_vs_base.py \
+    output/nn_full_action_az_mctsvalue.pt 400 16 --device cuda
 ```
 
 ---
