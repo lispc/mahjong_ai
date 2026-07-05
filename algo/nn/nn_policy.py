@@ -45,8 +45,11 @@ def _load_policy_model_from(weights_path, config_path=None):
         config = json.load(f)
     model = build_model(config)   # 支持 mlp / conv 架构
     sd = torch.load(weights_path, map_location='cpu')
-    if isinstance(sd, dict) and 'model_state_dict' in sd:
-        sd = sd['model_state_dict']
+    if isinstance(sd, dict):
+        if 'model_state_dict' in sd:
+            sd = sd['model_state_dict']
+        elif 'model_state' in sd:
+            sd = sd['model_state']
     model.load_state_dict(sd)
     model.eval()
     if torch.cuda.is_available():
