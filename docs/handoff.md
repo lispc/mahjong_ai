@@ -483,18 +483,59 @@ CUDA_VISIBLE_DEVICES=2 PYTHONPATH=. python3 scripts/rl/benchmark_az_vs_base.py \
 
 ---
 
-## 7. 未来方向备份（2026-07-02）
+## 6.9 AZ 失败后的快速验证（2026-07-05）
+
+AZ 三轮均未超越 base 后，按之前决策表执行了两个低成本验证：
+
+### 方向一：用 MCTS trace value 训练 conv value net
+
+- 在 500 局 MCTS trace（`alphazero_trace_500_mctsvalue.npz`）上训练 conv value net：`output/nn_value_conv_mctsvalue.pt`。
+- 放入 `BeliefExpectimaxV3Agent` 做 NN leaf（替换默认 `nn_value_model_mc.pt`）。
+
+100 局 benchmark 结果：
+
+| Agent | win | Elo |
+|---|---|---|
+| V3-NN-PC (MCTS value) | 15.0% | 1380 |
+| V3-NN (MCTS value) | 18.0% | 1402 |
+| BeliefExp | 35.0% | 1617 |
+| Baseline | 31.0% | 1636 |
+
+- **阴性**：MCTS trace value 的标度/语义与现有 MC value net 不兼容，直接替换 leaf 反而大幅下降。
+
+### 方向二：175-dim + deal-in auxiliary head
+
+- 修改 `train_full_action.py` 支持 deal-in BCE loss。
+- 用 `nn_full_action_data_128000.npz`（500k 子集）+ `nn_dealin_labels_2000.npz` 微调 base。
+- 输出：`output/nn_full_action_dealin_500k.pt`。
+
+400 局 benchmark vs base：
+
+| Agent | win | deal-in | Elo |
+|---|---|---|---|
+| Hybrid-dealin-500k | 44.0% | 25.0% | 1428 |
+| Hybrid-Base | 55.8% | 22.8% | 1572 |
+
+- **阴性**：deal-in val acc 高达 0.981，但 policy 变弱，点炮没降、胜率下降。
+- 原因可能是 deal-in 标签极度不平衡（正例仅 1.9%），模型学偏保守。
+
+---
+
+## 7. 未来方向备份（2026-07-05）
 
 当前项目已验证：
 - pMCPA / MCTS-PUCT / Oracle Distillation：阴性；
-- Deal-in auxiliary loss：阳性（纯前馈防守提升）；
-- NN + BeliefExp Hybrid：阳性（实用最强框架）；
-- Bootstrap 两代：一代阳性、二代收敛。
+- Deal-in auxiliary loss（175-dim）：阴性；
+- MCTS trace value net 替换 leaf：阴性；
+- AWBC v3：阴性；
+- NN + BeliefExp Hybrid：阳性（当前最强框架）。
 
-继续提升的候选方向（按推荐顺序，2026-07 更新）：
+继续提升的候选方向（按推荐顺序）：
 
-1. **Offline RL / DPO / 加权 BC**：PPO 在线自对弈在强 BC 初始化上发散，下一步优先尝试离线方法（DPO、reward-weighted BC、filtered BC、Best-of-N distillation），利用已有 128k 数据做策略优化。
-2. **更大网络 / 更强教师 / 特征改造**：若 offline RL 无效，再考虑容量或特征空间。
-3. **动作空间 / 规则层面改造**：已纳入完整动作空间（吃/碰/杠/胡），但可进一步 hierarchical policy 或对手建模。
+1. **212 维 danger 特征 + deal-in head**：175-dim deal-in 失败可能是因为缺少显式 danger 输入。把 `extract_features_ext` 的 212 维特征（含危险通道）喂给模型，再 auxiliary deal-in loss，是方向二的完整版。
+2. **Offline RL / DPO / 加权 BC**：AWBC 失败后，可尝试更稳定的离线方法（KTO、reward-weighted BC、Best-of-N distillation）。
+3. **更大网络 / 对手建模**：最后考虑容量或对手建模。
 
-**当前执行方向**：1（A. Reward shaping + KTO）与 2（C. 对手建模）并行启动。
+**当前执行方向**：先验证 212 维 danger + deal-in head。
+
+---
