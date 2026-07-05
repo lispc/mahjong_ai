@@ -76,14 +76,39 @@ def masked_response_loss(logits, actions, legal_mask):
     return F.cross_entropy(logits, actions)
 
 
-def evaluate(model, cfg, loader_disc, loader_resp, device):
+def masked_dealin_loss(logits, labels):
+    """deal-in 标签：1=点炮，0=安全，-1=不在手牌（不参与 loss）。"""
+    mask = labels >= 0
+    if mask.sum() == 0:
+        return torch.tensor(0.0, device=logits.device)
+    logits = logits[mask]
+    targets = labels[mask]
+    return F.binary_cross_entropy_with_logits(logits, targets)
+
+
+def dealin_metrics(logits, labels):
+    mask = labels >= 0
+    if mask.sum() == 0:
+        return 0.0, 0.0
+    pred = (torch.sigmoid(logits[mask]) > 0.5).float()
+    acc = (pred == labels[mask]).float().mean().item()
+    pos = labels[mask].mean().item()
+    return acc, pos
+
+
+def evaluate(model, cfg, loader_disc, loader_resp, device, loader_dealin=None):
     model.eval()
     total_disc, corr_disc = 0, 0
     total_resp, corr_resp = 0, 0
     sum_v_loss = 0.0
     sum_t_loss = 0.0
+    sum_d_loss = 0.0
     n_v = 0
     n_t = 0
+    n_d = 0
+    d_acc_sum = 0.0
+    d_pos_sum = 0.0
+    d_batches = 0
 
     with torch.no_grad():
         for xb, yb, vb, tb in loader_disc:
@@ -105,8 +130,6 @@ def evaluate(model, cfg, loader_disc, loader_resp, device):
             out = model(xb)
             d_logit, val, dealin_logit, cv_logit, r_logit = split_outputs(model, cfg, out)
             if r_logit is not None:
-                loss = masked_response_loss(r_logit, yb, lb)
-                # 仅统计 legal actions 中的 top1 准确率
                 logits = r_logit.clone()
                 logits[lb == 0] = -1e9
                 pred = logits.argmax(dim=1)
@@ -114,11 +137,27 @@ def evaluate(model, cfg, loader_disc, loader_resp, device):
                 corr_resp += ((pred == yb) & mask_ok).sum().item()
                 total_resp += mask_ok.sum().item()
 
+        if cfg.get('dealin_head', False) and loader_dealin is not None:
+            for xb, db, yb, vb in loader_dealin:
+                xb, db = xb.to(device), db.to(device)
+                out = model(xb)
+                d_logit, val, dealin_logit, cv_logit, r_logit = split_outputs(model, cfg, out)
+                if dealin_logit is not None:
+                    sum_d_loss += masked_dealin_loss(dealin_logit, db).item() * (db >= 0).sum().item()
+                    n_d += (db >= 0).sum().item()
+                    acc, pos = dealin_metrics(dealin_logit, db)
+                    d_acc_sum += acc
+                    d_pos_sum += pos
+                    d_batches += 1
+
     disc_acc = corr_disc / total_disc if total_disc else 0.0
     resp_acc = corr_resp / total_resp if total_resp else 0.0
     v_mse = sum_v_loss / n_v if n_v else 0.0
     t_bce = sum_t_loss / n_t if n_t else 0.0
-    return disc_acc, resp_acc, v_mse, t_bce
+    d_bce = sum_d_loss / n_d if n_d else 0.0
+    d_acc = d_acc_sum / d_batches if d_batches else 0.0
+    d_pos = d_pos_sum / d_batches if d_batches else 0.0
+    return disc_acc, resp_acc, v_mse, t_bce, d_bce, d_acc, d_pos
 
 
 def main():
@@ -139,6 +178,9 @@ def main():
                     help='DataLoader CPU workers for training loaders')
     ap.add_argument('--resume', type=str, default='',
                     help='resume from a per-epoch checkpoint (.pt)')
+    ap.add_argument('--dealin_data', type=str, default='',
+                    help='optional deal-in auxiliary data (.npz with X, dealin, y, v)')
+    ap.add_argument('--dealin_weight', type=float, default=0.5)
     args = ap.parse_args()
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -157,6 +199,31 @@ def main():
     yr = torch.from_numpy(data['y_response']).long()
     lr = torch.from_numpy(data['legal_response']).float()
     vr = torch.from_numpy(data['v_response']).float()
+
+    # optional deal-in auxiliary data
+    dealin_loader = None
+    val_dealin_loader = None
+    if args.dealin_data:
+        print(f'Loading deal-in data from {args.dealin_data}')
+        ddata = np.load(args.dealin_data)
+        Xdi = torch.from_numpy(ddata['X']).float()
+        Ddi = torch.from_numpy(ddata['dealin']).float()
+        ydi = torch.from_numpy(ddata['y']).long()
+        vdi = torch.from_numpy(ddata['v']).float()
+        n_di = len(Xdi)
+        n_val_di = max(1, int(n_di * args.val_ratio))
+        idxdi = np.random.permutation(n_di)
+        tr_id_di = idxdi[n_val_di:]
+        va_id_di = idxdi[:n_val_di]
+        train_dealin = TensorDataset(Xdi[tr_id_di], Ddi[tr_id_di], ydi[tr_id_di], vdi[tr_id_di])
+        val_dealin = TensorDataset(Xdi[va_id_di], Ddi[va_id_di], ydi[va_id_di], vdi[va_id_di])
+        dealin_loader = DataLoader(train_dealin, batch_size=args.batch, shuffle=True,
+                                   drop_last=True, num_workers=args.num_workers,
+                                   pin_memory=True if device.type == 'cuda' else False)
+        val_dealin_loader = DataLoader(val_dealin, batch_size=args.batch, shuffle=False,
+                                       num_workers=args.num_workers,
+                                       pin_memory=True if device.type == 'cuda' else False)
+        print(f'  deal-in samples: {len(train_dealin)} train, {len(val_dealin)} val')
 
     n_disc = len(Xd)
     n_resp = len(Xr)
@@ -234,9 +301,10 @@ def main():
         epoch_t_loss = 0.0
         n_batches = 0
 
-        # 双迭代器交替
+        # 三迭代器交替（discard / response / dealin）
         it_disc = iter(loader_disc)
         it_resp = iter(loader_resp)
+        it_dealin = iter(dealin_loader) if dealin_loader is not None else None
         while True:
             try:
                 xb, yb, vb, tb = next(it_disc)
@@ -255,7 +323,7 @@ def main():
 
             # discard branch
             out_d = model(xb)
-            d_logit, val_d, dealin_logit, cv_logit, _ = split_outputs(model, cfg, out_d)
+            d_logit, val_d, dealin_logit_d, cv_logit, _ = split_outputs(model, cfg, out_d)
             loss_disc = F.cross_entropy(d_logit, yb)
             loss_v = F.mse_loss(val_d.squeeze(1), vb)
             loss_t = 0.0
@@ -270,6 +338,20 @@ def main():
             loss_v += F.mse_loss(val_r.squeeze(1), vbr)
 
             loss = loss_disc + loss_resp * args.resp_weight + loss_v + loss_t * 0.5
+
+            # optional deal-in auxiliary loss
+            if cfg.get('dealin_head', False) and it_dealin is not None:
+                try:
+                    xdi, ddi, ydi, vdi = next(it_dealin)
+                except StopIteration:
+                    it_dealin = iter(dealin_loader)
+                    xdi, ddi, ydi, vdi = next(it_dealin)
+                xdi, ddi = xdi.to(device), ddi.to(device)
+                out_di = model(xdi)
+                _, _, dealin_logit_di, _, _ = split_outputs(model, cfg, out_di)
+                loss_dealin = masked_dealin_loss(dealin_logit_di, ddi)
+                loss += loss_dealin * args.dealin_weight
+
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
@@ -282,11 +364,15 @@ def main():
 
         scheduler.step()
 
-        disc_acc, resp_acc, v_mse, t_bce = evaluate(model, cfg, val_loader_disc, val_loader_resp, device)
-        print(f'Epoch {epoch:3d} | disc_loss {epoch_disc_loss/n_batches:.4f} '
-              f'resp_loss {epoch_resp_loss/n_batches:.4f} v_loss {epoch_v_loss/n_batches:.4f} '
-              f't_loss {epoch_t_loss/n_batches:.4f} | '
-              f'val disc_acc {disc_acc:.4f} resp_acc {resp_acc:.4f} v_mse {v_mse:.4f} t_bce {t_bce:.4f}')
+        disc_acc, resp_acc, v_mse, t_bce, d_bce, d_acc, d_pos = evaluate(
+            model, cfg, val_loader_disc, val_loader_resp, device, val_dealin_loader)
+        log_line = (f'Epoch {epoch:3d} | disc_loss {epoch_disc_loss/n_batches:.4f} '
+                    f'resp_loss {epoch_resp_loss/n_batches:.4f} v_loss {epoch_v_loss/n_batches:.4f} '
+                    f't_loss {epoch_t_loss/n_batches:.4f} | '
+                    f'val disc_acc {disc_acc:.4f} resp_acc {resp_acc:.4f} v_mse {v_mse:.4f} t_bce {t_bce:.4f}')
+        if cfg.get('dealin_head', False) and val_dealin_loader is not None:
+            log_line += f' d_bce {d_bce:.4f} d_acc {d_acc:.4f} d_pos {d_pos:.3f}'
+        print(log_line)
 
         if disc_acc > best_disc_acc:
             best_disc_acc = disc_acc

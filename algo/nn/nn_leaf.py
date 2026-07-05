@@ -45,8 +45,11 @@ def _load_model():
             _CONFIG = json.load(f)
         _MODEL = build_model(_CONFIG)
         sd = torch.load(env_model, map_location='cpu')
-        if isinstance(sd, dict) and 'model_state_dict' in sd:
-            sd = sd['model_state_dict']
+        if isinstance(sd, dict):
+            if 'model_state_dict' in sd:
+                sd = sd['model_state_dict']
+            elif 'model_state' in sd:
+                sd = sd['model_state']
         _MODEL.load_state_dict(sd)
         _MODEL.eval()
         if torch.cuda.is_available():
