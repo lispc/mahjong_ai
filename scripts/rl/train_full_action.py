@@ -165,6 +165,22 @@ def main():
     ap.add_argument('data')
     ap.add_argument('init_model')
     ap.add_argument('out_model')
+    ap.add_argument('--optimizer', type=str, default='adam',
+                    choices=['adam', 'adamw', 'sgd'],
+                    help='optimizer for training')
+    ap.add_argument('--scheduler', type=str, default='cosine',
+                    choices=['cosine', 'plateau', 'step', 'none'],
+                    help='learning rate schedule')
+    ap.add_argument('--label-smoothing', type=float, default=0.0,
+                    help='label smoothing for cross entropy')
+    ap.add_argument('--plateau-patience', type=int, default=5,
+                    help='patience for ReduceLROnPlateau')
+    ap.add_argument('--plateau-factor', type=float, default=0.5,
+                    help='lr reduction factor for ReduceLROnPlateau')
+    ap.add_argument('--step-gamma', type=float, default=0.5,
+                    help='lr decay factor for StepLR')
+    ap.add_argument('--step-size', type=int, default=20,
+                    help='step size for StepLR')
     ap.add_argument('--epochs', type=int, default=60)
     ap.add_argument('--batch', type=int, default=256)
     ap.add_argument('--lr', type=float, default=0.001)
@@ -267,8 +283,27 @@ def main():
     if not cfg.get('response_head', False):
         raise ValueError('init model must have response_head=True')
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.wd)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+    if args.optimizer == 'adam':
+        optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.wd)
+    elif args.optimizer == 'adamw':
+        optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.wd)
+    elif args.optimizer == 'sgd':
+        optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=0.9, weight_decay=args.wd)
+    else:
+        raise ValueError(args.optimizer)
+
+    if args.scheduler == 'cosine':
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+    elif args.scheduler == 'plateau':
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode='max', factor=args.plateau_factor, patience=args.plateau_patience,
+            verbose=True)
+    elif args.scheduler == 'step':
+        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=args.step_size, gamma=args.step_gamma)
+    else:
+        scheduler = None
+
+    ls = args.label_smoothing
 
     start_epoch = 1
     best_disc_acc = 0.0
@@ -324,7 +359,7 @@ def main():
             # discard branch
             out_d = model(xb)
             d_logit, val_d, dealin_logit_d, cv_logit, _ = split_outputs(model, cfg, out_d)
-            loss_disc = F.cross_entropy(d_logit, yb)
+            loss_disc = F.cross_entropy(d_logit, yb, label_smoothing=ls)
             loss_v = F.mse_loss(val_d.squeeze(1), vb)
             loss_t = 0.0
             if cfg.get('tenpai_head', False):
@@ -362,8 +397,6 @@ def main():
             epoch_t_loss += loss_t.item() if isinstance(loss_t, torch.Tensor) else 0.0
             n_batches += 1
 
-        scheduler.step()
-
         disc_acc, resp_acc, v_mse, t_bce, d_bce, d_acc, d_pos = evaluate(
             model, cfg, val_loader_disc, val_loader_resp, device, val_dealin_loader)
         log_line = (f'Epoch {epoch:3d} | disc_loss {epoch_disc_loss/n_batches:.4f} '
@@ -378,6 +411,12 @@ def main():
             best_disc_acc = disc_acc
             best_state = {k: v.to(device).clone() for k, v in base_model(model).state_dict().items()}
             best_cfg = cfg.copy()
+
+        if scheduler is not None:
+            if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                scheduler.step(disc_acc)
+            else:
+                scheduler.step()
 
         # 每 epoch 保存 checkpoint，方便中断/恢复
         epoch_path = args.out_model.replace('.pt', f'_epoch_{epoch:02d}.pt')
