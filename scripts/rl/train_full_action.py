@@ -40,7 +40,8 @@ def load_model(path, device):
     else:
         state = checkpoint
     allowed = {'input_dim', 'channels', 'n_blocks', 'hidden_dim', 'n_tile_ch', 'tile_len',
-               'dealin_head', 'tenpai_head', 'candidate_value_head', 'response_head'}
+               'dealin_head', 'tenpai_head', 'candidate_value_head', 'response_head',
+               'se_ratio', 'attn_heads', 'attn_layers'}
     ctor_cfg = {k: v for k, v in cfg.items() if k in allowed}
     model = TileConvNet(**ctor_cfg)
     model.load_state_dict(state)
@@ -296,8 +297,7 @@ def main():
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
     elif args.scheduler == 'plateau':
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='max', factor=args.plateau_factor, patience=args.plateau_patience,
-            verbose=True)
+            optimizer, mode='max', factor=args.plateau_factor, patience=args.plateau_patience)
     elif args.scheduler == 'step':
         scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=args.step_size, gamma=args.step_gamma)
     else:

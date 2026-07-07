@@ -12,7 +12,7 @@
 一个**晋北麻将 AI 研究与对战平台**，核心围绕：
 - 规则：推倒胡、不能吃牌、报听后锁手牌。
 - 算法：ExpectiMax / MCTS + 神经网络（Policy-Value Net + Deep Value Net）。
-- 当前最强 agent：`BeliefExpectimaxV3Agent`（V3-NN-PC），见 `docs/handoff.md`。
+- 当前最强 agent：`HybridNNBeliefAgent`（Hybrid-FullAction-SoupDistilled），见 `docs/handoff.md` §1 与 §7。
 
 ---
 
@@ -164,7 +164,7 @@ tail -f output/compute_mc_values_pypy_5000_part0.log
 from algo.agents.hybrid_nn_belief_agent import HybridNNBeliefAgent
 
 HybridNNBeliefAgent(
-    'Hybrid-FullAction-32k',
+    'Hybrid-FullAction-SoupDistilled',
     nn_model_path='output/nn_full_action_best.pt',
     belief_kind='beliefexp',
     tenpai_threshold=28,
@@ -176,55 +176,24 @@ HybridNNBeliefAgent(
 - `output/nn_full_action_best.pt` + `output/nn_full_action_best_config.json`
   - `TileConvNet`，128 channels / 6 residual blocks / 512 hidden
   - 带 dealin head、value head、tenpai head 与 **response head**（碰/杠/胡声明）
+  - 来源：把 `nn_full_action_best.pt` 与 `nn_full_action_128000_epoch_07.pt` 做 model soup，再用该 soup 当教师蒸馏回单一模型
 
-最近 benchmark（400 局，对手为 4k 版 `Hybrid-FullAction-4k` 与 `BeliefExpectimaxV3`）：
-- `Hybrid-FullAction-32k`：胜率 33.8%，Elo 1680，点炮率 16.8%
-- `Hybrid-FullAction-4k`：胜率 28.2%，Elo 1496，点炮率 18.2%
-- `BeliefExpectimaxV3`：胜率 9.2%，Elo 1324，点炮率 21.7%
+最近 benchmark（400 局同一 pool）：
+
+| Agent | win | self | ron | deal-in | draw | Elo |
+|---|---|---|---|---|---|---|
+| Hybrid-newbest (SoupDist.) | 34.2% | 7.5% | 26.8% | 15.5% | 0.5% | 1629 |
+| Hybrid-oldbest | 28.2% | 8.2% | 20.0% | 19.5% | 0.5% | 1519 |
+| BeliefExp | 19.2% | 6.0% | 13.2% | 16.0% | 0.5% | 1502 |
+| Baseline | 17.8% | 5.8% | 12.0% | 21.0% | 0.5% | 1350 |
 
 对上一版旧 best `Hybrid-BE16k_t8`（200 局）：
-- `Hybrid-FullAction-32k`：胜率 40.5%，Elo 1601，点炮率 15.0%
+- `Hybrid-FullAction-SoupDistilled`：胜率 40.5%，Elo 1601，点炮率 15.0%
 - `Hybrid-BE16k_t8`：胜率 22.0%，Elo 1507，点炮率 20.5%
 
-完整动作 PPO 微调（200 局 vs 32k BC / V3）：
-- `PPO`：胜率 26.5%，Elo 1573，点炮率 17.5%
-- `BC32k`：胜率 28.0%，Elo 1477，点炮率 21.0%
-- `V3`：胜率 16.0%，Elo 1450，点炮率 17.5%
-- PPO 在自对弈指标上只是边际提升，但在真实 pool 中 Elo 比 32k BC 高约 100，点炮率明显更低。
+128k 行为克隆与 DPO/PPO/KTO 等后续实验均**未稳定超越**当前 SoupDistilled best；第二轮 soup/蒸馏 bootstrap 也已边际递减。详见 `docs/handoff.md §6.10–§6.14`。
 
-**128k 行为克隆已完成**（30 epoch，3 GPU DataParallel）：
-- 数据：`output/nn_full_action_data_128000.npz`（128k 局，约 547 万 discard / 1681 万 response 样本）。
-- 训练从 `output/nn_full_action_best.pt` 热启；Epoch 1 后 val disc_acc 为 **0.9444**，后续 29 epoch 完全 plateau（loss/acc 几乎不变）。
-- 脚本已支持 **每 epoch checkpoint + 断点续跑**：`output/nn_full_action_128000_epoch_{N}.pt` + `_config.json`，可用 `--resume` 恢复。
-- 关键 benchmark（200 局，pool 含 PPO/BC32k）：
-  - Epoch 1：`BC128k_E1` Elo **1601**，点炮 **16.5%**
-  - Epoch 7：`BC128k_E7` Elo **1621**（128k 里最高）
-  - Epoch 30（final）：`BC128k_E30` Elo **1566**，点炮 **20.0%**
-- 结论：**单纯把 BC 数据从 32k 放大到 128k 没有稳定收益**，最终模型反而不如中间 epoch；未替换 best。
-
-**DPO（完整动作，outcome-level 偏好对）**：
-- 实现：`scripts/rl/train_full_action_dpo.py`。
-- 从 `output/nn_full_action_best.pt` 热启，用 128k 数据里的 `v_discard/v_response` 构造偏好对（赢=chosen，输=rejected）。
-- 10 epochs，β=0.1，lr=5e-5；discard DPO acc 从 0.656 提到 0.717，但 response 几乎没动（0.055）。
-- Benchmark（200 局）：DPO Elo **1333**，胜率 5.0%，点炮 26.0%；明显弱于 BC32k（1612）和 PPO（1596）。
-- 结论：**跨状态构造 outcome-level 偏好对的 DPO 不适合当前数据**，模型学到了区分赢/输样本，但没有转化成更强的策略。
-
-旧模型保留：
-- `output/nn_full_action_32000.pt` / `_config.json`（32k 原始训练输出）
-- `output/nn_full_action_4000.pt` / `_config.json`（4k 版，已被 best 覆盖）
-- `output/nn_conv_bc_beliefexp_trace_16000_big_t8.pt` + `_config.json`（旧 best，无 response head）
-  - 训练数据：16000 局纯 `BeliefExpectimaxAgent` 搜索轨迹（734073 样本）
-  - 蒸馏设置：α=0.5，T=8，β=0.3，λ_dealin=0.5
-
-当前 best **Hybrid-FullAction-32k** 在 2000 局公平 pool 中胜率 **33.8%**、点炮 **16.8%**、Elo **1680**。128k BC 和 outcome-level DPO 都未超过它；下一步建议尝试 **加权 BC / filtered BC / Best-of-N**（见 §11.2、11.3、11.5）。
-
-备份：
-- `output/nn_conv_bc_beliefexp_trace_8000_big_t8.pt` / `..._config.json`（上一版本候选）
-- `output/nn_conv_bc_beliefexp_trace_8000_big_t4.pt` / `..._config.json`（再上一版本候选）
-- `output/nn_conv_bc_beliefexp_trace_4000_big.pt` / `..._config.json`（上一代候选 Hybrid-BE4k_big）
-- `output/nn_conv_bc_hybrid_2000.pt` / `..._config.json`（上一代稳健候选 Hybrid-Base）
-- `output/nn_conv_bc_dealin_2000_l07.pt` / `..._config.json`（纯前馈首选）
-- `output/nn_model_best_1581.pt` / `output/nn_value_model_mc_best_1581.pt`（历史 V3-NN-PC best）
+> **2026-07-06 重要更新**：新增 duplicate（复式）赛制评测后，发现固定 position 0 的考场中 Baseline 显著强于当前 best（paired A−B = −20.2%，95% CI 不含 0）。普通 tournament 中 Hybrid 仍然更强，说明座位/发牌运气是巨大混淆因素。在晋升/放弃决策前，建议先用 `scripts/rl/benchmark_duplicate.py` 建立固定标准考场并复测候选。
 
 ---
 
@@ -234,25 +203,38 @@ HybridNNBeliefAgent(
 
 | 文件 | 职责 |
 |---|---|
-| `algo/nn/model.py` | Policy-Value Net（PyTorch） |
+| `algo/nn/model.py` | Policy-Value Net（PyTorch）；`TileConvNet` 现支持 `se_ratio`、`attn_heads`、`attn_layers`、`wait_dist_head` |
 | `algo/nn/value_model.py` | Deep Value Net（PyTorch） |
-| `algo/nn/nn_leaf.py` | ExpectiMax 叶子估值接口 |
-| `algo/nn/nn_policy.py` | NN policy 候选生成接口 |
+| `algo/nn/nn_leaf.py` | ExpectiMax 叶子估值接口；可用 `MJ_NN_VALUE_MODEL` 指定 policy-value 网络当 value leaf |
+| `algo/nn/nn_policy.py` | NN policy 候选生成接口；支持 `MJ_NN_POLICY_MODEL` 环境变量切换默认 policy 模型路径 |
 | `algo/nn/features.py` | 175 维特征编码 |
 | `algo/nn/mc_value.py` | MC rollout 快速对局 + value label |
+| `algo/eval/endgame_solver.py` | 报听后终盘精确求解器（方向3） |
+| `algo/agents/exact_endgame_agent.py` | 终盘使用精确求解器的 wrapper agent |
+
+新增/扩展脚本：
+- `scripts/rl/init_large_model.py`：按指定架构初始化 TileConvNet checkpoint
+- `scripts/rl/train_large_model.py`：启动 large SE/attention 训练
+- `scripts/rl/summarize_hpo.py`：汇总 HPO 训练日志
+- `scripts/rl/make_model_soup.py`：同架构 checkpoint 权重平均
 
 ### 5.2 数据文件
 
 | 文件 | 说明 |
 |---|---|
-| `output/nn_full_action_data_128000.npz` | 128k 局完整动作空间 BC 数据（~547万 discard / ~1681万 response 样本） |
+| `output/nn_full_action_data_128000.npz` | 128k 局完整动作空间 BC 数据（~547万 discard / ~1681万 response 样本，16 GB） |
 | `output/nn_full_action_data_32000.npz` | 32k 局完整动作空间 BC 数据（当前 best `nn_full_action_best.pt` 来源） |
+| `output/nn_hybrid_soup_teacher_8000.npz` | 8000 局 Soup2 教师轨迹（334k discard / 2M response） |
 | `output/nn_full_action_128000_epoch_{N}.pt` | 128k BC 每 epoch checkpoint（含 optimizer state，可 `--resume`） |
 | `output/nn_training_data_selfplay_baseline_rollout_2000.npz` | 25569 条 2000 局 baseline rollout 数据（当前 best 来源） |
 | `output/nn_training_data_selfplay_baseline_rollout_1000.npz` | 12835 条 1000 局 baseline rollout 数据 |
 | `output/nn_training_data_mc.npz` | 46k 历史 MC 数据（BeliefExp + eval0 rollout） |
 | `output/nn_training_data_selfplay.npz` | 50k 历史 V3-NN 自对弈数据 |
 | `output/selfplay_raw_*.pkl` | 原始自对弈样本（context, hand14, action, features），等待计算 MC value |
+| `output/duplicate_best_vs_baseline_400.pkl` | duplicate 评测原始结果（400 seeds，Hybrid vs Baseline） |
+| `output/exact_endgame_labels_1000.npz` | 1000 局 BeliefExp 自对弈生成的 exact endgame 防守标签（13,843 样本） |
+| `output/wait_dist_labels_*.npz` | 待牌分布监督样本（features + 34-dim wait one-hot） |
+| `output/nn_wait_dist_tenpai_300.pt` | 300 局听牌样本上训练的 wait_dist head 初版 |
 
 ### 5.3 模型文件格式
 
@@ -269,9 +251,28 @@ HybridNNBeliefAgent(
 # 测试
 PYTHONPATH=. python run_tests.py
 
-# 训练
+# 训练（legacy policy / value）
 PYTHONPATH=. python scripts/train_nn.py output/nn_training_data_selfplay_baseline_rollout_2000.npz 60 256 0.001 256
 PYTHONPATH=. python scripts/train_value_net_mc.py output/nn_training_data_selfplay_baseline_rollout_2000.npz 60 256 0.001 512,256,128
+
+# 完整动作空间训练 / HPO
+PYTHONPATH=. python scripts/rl/train_full_action.py \
+    output/nn_hybrid_soup_teacher_8000.npz output/nn_full_action_best.pt \
+    output/nn_full_action_hpo.pt --epochs 60 --batch 512 --lr 5e-5 \
+    --optimizer adam --scheduler cosine --num_workers 4 --dp 0
+
+# 初始化并训练 larger SE/attention 模型
+PYTHONPATH=. python scripts/rl/init_large_model.py output/nn_full_action_large_se_init.pt \
+    --channels 256 --n-blocks 8 --hidden-dim 1024 --se-ratio 16
+PYTHONPATH=. python scripts/rl/train_large_model.py --gpu 0 \
+    --init output/nn_full_action_large_se_init.pt --out output/nn_full_action_large_se.pt
+
+# HPO 日志汇总
+PYTHONPATH=. python scripts/rl/summarize_hpo.py
+
+# 模型 soup
+PYTHONPATH=. python scripts/rl/make_model_soup.py output/nn_full_action_soup.pt \
+    output/nn_full_action_best.pt output/nn_full_action_128000_epoch_07.pt
 
 # 自对弈数据生成（4 GPU）
 bash scripts/generate_selfplay_4gpu.sh 5000 32 900000
@@ -302,6 +303,30 @@ wait
 
 # Benchmark（4 GPU）
 bash scripts/benchmark_4gpu.sh 400 4
+
+# 任意 4 agent 同一 pool benchmark
+SEATS="hybrid:newbest:output/nn_full_action_best.pt:beliefexp,beliefexp,baseline,v3nnpc" \
+    PYTHONPATH=. python3 scripts/rl/benchmark_pool.py 400 16
+
+# Duplicate（复式）benchmark：Hybrid vs Baseline，固定对手三件套
+PYTHONPATH=. python3 scripts/rl/benchmark_duplicate.py \
+    --a hybrid:Best:output/nn_full_action_best.pt \
+    --b baseline \
+    --opponents baseline,beliefexp,hybrid:Base:output/nn_full_action_best.pt \
+    --n-seeds 400 --workers 32
+
+# 生成 exact endgame 防守标签
+PYTHONPATH=. python3 scripts/rl/generate_exact_endgame_labels.py \
+    output/exact_endgame_labels_1000.npz 1000 32
+
+# 生成 wait distribution 标签
+PYTHONPATH=. python3 scripts/rl/generate_wait_dist_labels.py \
+    output/wait_dist_labels_10000.npz 10000 32
+
+# 训练 wait_dist head（在 current best backbone 上）
+PYTHONPATH=. python3 scripts/rl/train_wait_dist.py \
+    output/wait_dist_labels_10000.npz output/nn_full_action_best.pt \
+    output/nn_wait_dist.pt --epochs 60 --batch 512 --device cuda:0
 ```
 
 ---
@@ -313,7 +338,8 @@ bash scripts/benchmark_4gpu.sh 400 4
 3. **legacy eval2 cache 必须限制大小**：`algo/eval/legacy.py` 使用 `lru_cache(maxsize=1_000_000)`，避免 PyPy 长任务内存爆炸。
 4. **DataCollector 保存的是决策前状态**：`algo/agents/data_collectors.py` 中 `hand14` 和 `context` 快照必须在 `super().next()` 之前捕获，否则 MC rollout 会拿到不一致的 13 张手牌 / 弃牌后 context。
 5. **`mc_value._greedy_discard` 返回 tile**：`algo.select(...)[0]` 返回的是 `(metric, tile)` 元组，取 tile 要用 `[0][1]`。
-6. **tournament 默认只用一个 GPU**：大规模 benchmark 时若 GPU 0 成为瓶颈，用 `scripts/benchmark_4gpu.sh` 拆 4 进程。
+6. **`MJ_NN_POLICY_MODEL` 环境变量**：`algo/nn/nn_policy.py` 支持通过该变量切换默认 policy 模型（例如 MC rollout 的 `nnpolicy` 模式想使用 `output/nn_full_action_best.pt` 时设置）。
+7. **tournament 默认只用一个 GPU**：大规模 benchmark 时若 GPU 0 成为瓶颈，用 `scripts/benchmark_4gpu.sh` 拆 4 进程。
 7. **输出目录 `output/` 被 gitignore，但 config json 被跟踪**：修改模型配置后记得提交 `.json` 文件。
 8. **不要提交 `.venv/`**：已加入 `.gitignore`。
 

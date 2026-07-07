@@ -3,9 +3,13 @@ import tile
 
 
 class Pool:
-    def __init__(self):
+    def __init__(self, seed=None):
         self.tiles = tile.all_tiles()
-        random.shuffle(self.tiles)
+        if seed is not None:
+            rng = random.Random(seed)
+            rng.shuffle(self.tiles)
+        else:
+            random.shuffle(self.tiles)
         self.idx = 0
 
     def next(self):

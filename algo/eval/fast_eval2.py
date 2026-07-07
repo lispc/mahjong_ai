@@ -129,6 +129,11 @@ class FastEval2:
         total = self.rem.sum()
         self.tile_prob = self.rem / total if total > 0 else np.zeros(34, dtype=np.float64)
 
+    def eval2(self, hand13):
+        """返回 hand13 的两 ply 期望 metric。"""
+        counts = eval_v3.hand_to_counts(hand13)
+        return _eval2_counts(counts, self.rem, self.tile_prob, top_k=30)
+
     def select(self, hand14):
         """返回按 eval2 排序的弃牌 tile 列表。"""
         assert len(hand14) == 14

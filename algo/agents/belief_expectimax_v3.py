@@ -12,6 +12,7 @@
 """
 
 import functools
+import os
 import agent
 import tile
 import algo
@@ -25,6 +26,15 @@ from algo.eval.player_belief import PlayerBelief
 
 _NN_LEAF_MOD = None
 _NN_POLICY_MOD = None
+_EXPECTIMAX2_MOD = None
+
+
+def _get_expectimax2():
+    global _EXPECTIMAX2_MOD
+    if _EXPECTIMAX2_MOD is None:
+        from algo.eval import _expectimax2
+        _EXPECTIMAX2_MOD = _expectimax2
+    return _EXPECTIMAX2_MOD
 
 
 def _get_nn_leaf():
@@ -118,7 +128,9 @@ class BeliefExpectimaxV3Agent(agent.Agent):
                  leaf_evaluator='eval0',
                  candidate_policy='baseline_eval1',
                  candidate_model_path=None,
-                 candidate_union=False):
+                 candidate_union=False,
+                 inner_max_draw_tiles=12,
+                 inner_max_discard_candidates=3):
         super().__init__(name, verbose)
         self.expectimax_depth = expectimax_depth
         self.max_candidates = max_candidates
@@ -128,6 +140,8 @@ class BeliefExpectimaxV3Agent(agent.Agent):
         # RL+搜索融合：用指定 policy 模型（如 PPO）生成候选；union 则与默认 nn_model 取并集
         self.candidate_model_path = candidate_model_path
         self.candidate_union = candidate_union
+        self.inner_max_draw_tiles = int(os.environ.get('INNER_MAX_DRAW', inner_max_draw_tiles))
+        self.inner_max_discard_candidates = int(os.environ.get('INNER_MAX_DISC', inner_max_discard_candidates))
         self.context = context_v3.ContextV3()
         self._belief = None
         self._weights_tuple = tuple(sorted(eval_v3.DEFAULT_WEIGHTS.items()))
@@ -198,6 +212,10 @@ class BeliefExpectimaxV3Agent(agent.Agent):
         """自洽 expectimax：depth 轮摸牌+打牌。"""
         if self.leaf_evaluator == 'nn' and depth == 1:
             return self._expectimax_value_batched_nn(hand, effective_remaining)
+        if self.leaf_evaluator == 'nn' and depth == 2:
+            if os.environ.get('EXACT_DEPTH2') == '1':
+                return self._expectimax_value_batched_nn_depth2_exact(hand, effective_remaining)
+            return self._expectimax_value_batched_nn_depth2(hand, effective_remaining)
         hand_tuple = tuple(sorted(hand))
         rem_tuple = tuple(sorted(effective_remaining.items()))
         return _expectimax_cached(hand_tuple, rem_tuple, depth, self.leaf_evaluator)
@@ -228,6 +246,208 @@ class BeliefExpectimaxV3Agent(agent.Agent):
 
             values = _get_nn_leaf().nn_leaf_values_batch(leaves)
             ev += prob * max(values)
+        return ev
+
+    def _expectimax_value_batched_nn_depth2(self, hand13, effective_remaining):
+        """带激进剪枝的 depth=2 NN leaf 批量评估。
+
+        只保留 top-P 摸牌分支和 top-K 弃牌分支，最终把所有 depth-0 叶子手牌
+        一次性 batch 进 NN，避免递归中逐片前向。
+        """
+        hand13 = list(hand13)
+        total1 = sum(effective_remaining.values())
+        if total1 <= 0:
+            return _get_nn_leaf().nn_leaf_value(hand13)
+
+        draw1_items = sorted(
+            ((t, c) for t, c in effective_remaining.items() if c > 0),
+            key=lambda x: -x[1])[:self.inner_max_draw_tiles]
+        total1_sel = sum(c for _, c in draw1_items) or 1.0
+
+        leaf_hands = []
+        leaf_index = {}
+
+        def _leaf_idx(hand):
+            key = tuple(sorted(hand))
+            idx = leaf_index.get(key)
+            if idx is None:
+                idx = len(leaf_hands)
+                leaf_index[key] = idx
+                leaf_hands.append(list(hand))
+            return idx
+
+        # tree1: list of (prob1, win_value, children) 其中 children 是 x1->branches 的 dict
+        tree1 = []
+        for t1, cnt1 in draw1_items:
+            prob1 = cnt1 / total1_sel
+            hand14_1 = hand13 + [t1]
+            if eval_v3._is_win_14(eval_v3.hand_to_counts(hand14_1)):
+                tree1.append((prob1, WIN_VALUE, None))
+                continue
+            rem1 = dict(effective_remaining)
+            rem1[t1] = max(0.0, rem1.get(t1, 0.0) - 1.0)
+
+            discards1 = self._unique_tiles(hand14_1)
+            if len(discards1) > self.inner_max_discard_candidates:
+                scored = []
+                for x in discards1:
+                    h = list(hand14_1)
+                    h.remove(x)
+                    scored.append((algo.eval0(h, _EMPTY_CONTEXT), x))
+                scored.sort(reverse=True)
+                discards1 = [x for _, x in scored[:self.inner_max_discard_candidates]]
+
+            children = {}
+            for x1 in discards1:
+                hand13_1 = list(hand14_1)
+                hand13_1.remove(x1)
+
+                draw2_items = sorted(
+                    ((t, c) for t, c in rem1.items() if c > 0),
+                    key=lambda x: -x[1])[:self.inner_max_draw_tiles]
+                total2_sel = sum(c for _, c in draw2_items) or 1.0
+
+                branches = []  # (prob2, is_win, leaf_indices)
+                if not draw2_items:
+                    idx = _leaf_idx(hand13_1)
+                    branches.append((1.0, False, [idx]))
+                else:
+                    for t2, cnt2 in draw2_items:
+                        prob2 = cnt2 / total2_sel
+                        hand14_2 = hand13_1 + [t2]
+                        if eval_v3._is_win_14(eval_v3.hand_to_counts(hand14_2)):
+                            branches.append((prob2, True, None))
+                            continue
+                        rem2 = dict(rem1)
+                        rem2[t2] = max(0.0, rem2.get(t2, 0.0) - 1.0)
+                        discards2 = self._unique_tiles(hand14_2)
+                        if len(discards2) > self.inner_max_discard_candidates:
+                            scored = []
+                            for x in discards2:
+                                h = list(hand14_2)
+                                h.remove(x)
+                                scored.append((algo.eval0(h, _EMPTY_CONTEXT), x))
+                            scored.sort(reverse=True)
+                            discards2 = [x for _, x in scored[:self.inner_max_discard_candidates]]
+                        indices = []
+                        for x2 in discards2:
+                            hand13_2 = list(hand14_2)
+                            hand13_2.remove(x2)
+                            indices.append(_leaf_idx(hand13_2))
+                        branches.append((prob2, False, indices))
+                children[x1] = branches
+            tree1.append((prob1, None, children))
+
+        # 一次性 batch 评估所有 depth-0 叶子
+        leaf_values = _get_nn_leaf().nn_leaf_values_batch(leaf_hands)
+
+        ev = 0.0
+        for prob1, win1, children in tree1:
+            if win1 is not None:
+                ev += prob1 * win1
+                continue
+            best_x1 = -float('inf')
+            for branches in children.values():
+                val13_1 = 0.0
+                for prob2, is_win, indices in branches:
+                    if is_win:
+                        val13_1 += prob2 * WIN_VALUE
+                    else:
+                        val13_1 += prob2 * max(leaf_values[idx] for idx in indices)
+                if val13_1 > best_x1:
+                    best_x1 = val13_1
+            ev += prob1 * best_x1
+        return ev
+
+    def _expectimax_value_batched_nn_depth2_exact(self, hand13, effective_remaining):
+        """使用 Cython 精确枚举的 depth-2 NN leaf 评估（无 inner 剪枝）。"""
+        values = self._expectimax_values_batched_nn_depth2_exact(
+            [(hand13, effective_remaining)])
+        return values[0]
+
+    def _expectimax_values_batched_nn_depth2_exact(self, hand13_effs):
+        """对多个 (hand13, effective_remaining) 批量做精确 depth-2 评估，
+        只调用一次 NN leaf value net。
+        """
+        emod = _get_expectimax2()
+        leaf_map = {}
+        leaf_hands = []
+        trees = []
+
+        for hand13, effective_remaining in hand13_effs:
+            rem34 = [0.0] * 34
+            for t, c in effective_remaining.items():
+                if c > 0.0:
+                    rem34[eval_v3._TILE_TO_IDX[t]] = c
+
+            local_leaf_hands, tree = emod.build_depth2_tree(list(hand13), rem34)
+            if not local_leaf_hands:
+                local_leaf_hands = [list(hand13)]
+                tree = [('leaf', 1.0, [0])]
+
+            local_to_global = {}
+            for i, hand in enumerate(local_leaf_hands):
+                key = tuple(sorted(hand))
+                idx = leaf_map.get(key)
+                if idx is None:
+                    idx = len(leaf_hands)
+                    leaf_map[key] = idx
+                    leaf_hands.append(hand)
+                local_to_global[i] = idx
+
+            trees.append(self._remap_depth2_tree(tree, local_to_global))
+
+        leaf_values = _get_nn_leaf().nn_leaf_values_batch(leaf_hands)
+        return [self._eval_depth2_tree(tree, leaf_values) for tree in trees]
+
+    def _remap_depth2_tree(self, tree, local_to_global):
+        """把 tree 中的局部 leaf index 映射到全局 index。"""
+        new_tree = []
+        for branch in tree:
+            kind = branch[0]
+            if kind == 'win':
+                new_tree.append(branch)
+            elif kind == 'leaf':
+                new_tree.append((kind, branch[1],
+                                 [local_to_global[i] for i in branch[2]]))
+            else:  # 'node'
+                children = {}
+                for x1, branches in branch[2].items():
+                    new_branches = []
+                    for b in branches:
+                        if b[0] == 'win':
+                            new_branches.append(b)
+                        else:
+                            new_branches.append((b[0], b[1],
+                                                 [local_to_global[i] for i in b[2]]))
+                    children[x1] = new_branches
+                new_tree.append((kind, branch[1], children))
+        return new_tree
+
+    def _eval_depth2_tree(self, tree, leaf_values):
+        """回代 Cython 返回的 depth-2 tree。"""
+        ev = 0.0
+        for branch in tree:
+            kind = branch[0]
+            if kind == 'win':
+                ev += branch[1] * WIN_VALUE
+            elif kind == 'leaf':
+                ev += branch[1] * max(leaf_values[idx] for idx in branch[2])
+            else:  # 'node'
+                prob1 = branch[1]
+                children = branch[2]
+                best = -float('inf')
+                for branches in children.values():
+                    val = 0.0
+                    for b in branches:
+                        bkind = b[0]
+                        if bkind == 'win':
+                            val += b[1] * WIN_VALUE
+                        else:
+                            val += b[1] * max(leaf_values[idx] for idx in b[2])
+                    if val > best:
+                        best = val
+                ev += prob1 * best
         return ev
 
     def _danger_signal(self):
@@ -332,15 +552,35 @@ class BeliefExpectimaxV3Agent(agent.Agent):
         evaluated = []
         score_map = {}
         danger_map = {}
-        for disc in top:
-            hand13 = list(self.cur)
-            hand13.remove(disc)
-            effective = self._effective_remaining(hand13)
-            offense = self._expectimax_value(hand13, effective, self.expectimax_depth)
-            danger = self._aggregate_danger(disc)
-            evaluated.append((offense, danger, disc))
-            score_map[disc] = float(offense)
-            danger_map[disc] = float(danger)
+
+        use_exact_batch = (
+            self.expectimax_depth == 2 and
+            self.leaf_evaluator == 'nn' and
+            os.environ.get('EXACT_DEPTH2') == '1'
+        )
+
+        if use_exact_batch:
+            hand13_effs = []
+            for disc in top:
+                hand13 = list(self.cur)
+                hand13.remove(disc)
+                hand13_effs.append((hand13, self._effective_remaining(hand13)))
+            offenses = self._expectimax_values_batched_nn_depth2_exact(hand13_effs)
+            for disc, offense in zip(top, offenses):
+                danger = self._aggregate_danger(disc)
+                evaluated.append((offense, danger, disc))
+                score_map[disc] = float(offense)
+                danger_map[disc] = float(danger)
+        else:
+            for disc in top:
+                hand13 = list(self.cur)
+                hand13.remove(disc)
+                effective = self._effective_remaining(hand13)
+                offense = self._expectimax_value(hand13, effective, self.expectimax_depth)
+                danger = self._aggregate_danger(disc)
+                evaluated.append((offense, danger, disc))
+                score_map[disc] = float(offense)
+                danger_map[disc] = float(danger)
 
         if self.leaf_evaluator == 'nn':
             _get_nn_leaf().clear_leaf_context()

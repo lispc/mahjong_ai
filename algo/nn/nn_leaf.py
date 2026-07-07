@@ -8,12 +8,16 @@ context”的方式：每次 agent 做决策前把当前局面写进线程无关
 
 import os
 import json
+import functools
 import numpy as np
 
 import algo
 import context as ctx_module
 
 from algo.nn.features import extract_features, _context_features, _hand_to_array
+
+
+_FORCE_CPU = os.environ.get('FORCE_CPU') == '1'
 
 
 _EMPTY_CONTEXT = ctx_module.Context()
@@ -24,6 +28,8 @@ _CONFIG = None
 _CURRENT_CONTEXT = None
 _CURRENT_PLAYER = None
 _CURRENT_HAND14 = None
+_LEAF_CACHE = None
+_LEAF_CACHE_MAX = int(os.environ.get('MJ_NN_LEAF_CACHE', '0'))
 
 
 def _load_model():
@@ -43,16 +49,23 @@ def _load_model():
         cfg_path = os.environ.get('MJ_NN_VALUE_CONFIG') or env_model.replace('.pt', '_config.json')
         with open(cfg_path, 'r') as f:
             _CONFIG = json.load(f)
-        _MODEL = build_model(_CONFIG)
+        arch = _CONFIG.get('arch', 'mlp')
+        if arch == 'deep':
+            hidden_dims = _CONFIG.get('hidden_dims')
+            _MODEL = MahjongValueNetDeep(_CONFIG['input_dim'], hidden_dims)
+        elif arch == 'value':
+            _MODEL = MahjongValueNet(_CONFIG['input_dim'], _CONFIG.get('hidden_dim', 256))
+        else:
+            _MODEL = build_model(_CONFIG)
         sd = torch.load(env_model, map_location='cpu')
         if isinstance(sd, dict):
             if 'model_state_dict' in sd:
                 sd = sd['model_state_dict']
             elif 'model_state' in sd:
                 sd = sd['model_state']
-        _MODEL.load_state_dict(sd)
+        _MODEL.load_state_dict(sd, strict=False)
         _MODEL.eval()
-        if torch.cuda.is_available():
+        if not _FORCE_CPU and torch.cuda.is_available():
             _MODEL = _MODEL.cuda()
         return _MODEL, _CONFIG
 
@@ -69,7 +82,7 @@ def _load_model():
             _MODEL = MahjongValueNet(_CONFIG['input_dim'], _CONFIG.get('hidden_dim', 256))
         _MODEL.load_state_dict(torch.load(mc_weights_path, map_location='cpu'))
         _MODEL.eval()
-        if torch.cuda.is_available():
+        if not _FORCE_CPU and torch.cuda.is_available():
             _MODEL = _MODEL.cuda()
         return _MODEL, _CONFIG
 
@@ -82,7 +95,7 @@ def _load_model():
         _MODEL = MahjongValueNet(_CONFIG['input_dim'], _CONFIG['hidden_dim'])
         _MODEL.load_state_dict(torch.load(value_weights_path, map_location='cpu'))
         _MODEL.eval()
-        if torch.cuda.is_available():
+        if not _FORCE_CPU and torch.cuda.is_available():
             _MODEL = _MODEL.cuda()
         return _MODEL, _CONFIG
 
@@ -98,24 +111,26 @@ def _load_model():
     _MODEL = MahjongNet(_CONFIG['input_dim'], _CONFIG['hidden_dim'])
     _MODEL.load_state_dict(torch.load(weights_path, map_location='cpu'))
     _MODEL.eval()
-    if torch.cuda.is_available():
+    if not _FORCE_CPU and torch.cuda.is_available():
         _MODEL = _MODEL.cuda()
     return _MODEL, _CONFIG
 
 
 def set_leaf_context(context, player_name, current_hand14=None):
     """在 expectimax 搜索前设置当前决策局面。"""
-    global _CURRENT_CONTEXT, _CURRENT_PLAYER, _CURRENT_HAND14
+    global _CURRENT_CONTEXT, _CURRENT_PLAYER, _CURRENT_HAND14, _LEAF_CACHE
     _CURRENT_CONTEXT = context
     _CURRENT_PLAYER = player_name
     _CURRENT_HAND14 = current_hand14
+    _LEAF_CACHE = {}
 
 
 def clear_leaf_context():
-    global _CURRENT_CONTEXT, _CURRENT_PLAYER, _CURRENT_HAND14
+    global _CURRENT_CONTEXT, _CURRENT_PLAYER, _CURRENT_HAND14, _LEAF_CACHE
     _CURRENT_CONTEXT = None
     _CURRENT_PLAYER = None
     _CURRENT_HAND14 = None
+    _LEAF_CACHE = {}
 
 
 def nn_leaf_value(hand):
@@ -128,11 +143,50 @@ def nn_leaf_values_batch(hands):
 
     把同一局面下的所有叶子手牌拼成一个大 batch 一次性前向，避免多次小 batch
     调度的开销。
-    """
-    import torch
 
+    若环境变量 MJ_NN_LEAF_CACHE > 0，会在同一决策内按 canonical hand tuple 做
+    LRU 缓存，减少重复 NN 前向（对 exact depth-2 多个 top-level candidate 共享
+    leaf 有帮助）。
+    """
     if not hands:
         return []
+
+    if _LEAF_CACHE_MAX <= 0:
+        return _evaluate_hands(hands)
+
+    # LRU cache by sorted hand tuple
+    results = [None] * len(hands)
+    misses = []
+    miss_idx = []
+    keys = []
+    for i, hand in enumerate(hands):
+        key = tuple(sorted(hand))
+        keys.append(key)
+        val = _LEAF_CACHE.get(key)
+        if val is not None:
+            results[i] = val
+        else:
+            misses.append(hand)
+            miss_idx.append(i)
+
+    if misses:
+        miss_values = _evaluate_hands(misses)
+        for j, idx in enumerate(miss_idx):
+            key = keys[idx]
+            # simple LRU eviction
+            if len(_LEAF_CACHE) >= _LEAF_CACHE_MAX and key not in _LEAF_CACHE:
+                # pop arbitrary key
+                _LEAF_CACHE.pop(next(iter(_LEAF_CACHE)))
+            _LEAF_CACHE[key] = miss_values[j]
+            results[idx] = miss_values[j]
+
+    return results
+
+
+def _evaluate_hands(hands):
+    """实际做 NN 前向并应用 leaf 公式的内部函数。"""
+    import torch
+
     model, _ = _load_model()
     ctx = _CURRENT_CONTEXT
     player = _CURRENT_PLAYER
@@ -149,7 +203,7 @@ def nn_leaf_values_batch(hands):
 
     X = np.concatenate([hand_matrix, np.tile(ctx_arr, (n, 1))], axis=1)
     X_t = torch.tensor(X, dtype=torch.float32)
-    if torch.cuda.is_available():
+    if not _FORCE_CPU and torch.cuda.is_available():
         X_t = X_t.cuda()
 
     with torch.no_grad():

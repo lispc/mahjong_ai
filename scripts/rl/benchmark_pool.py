@@ -9,9 +9,20 @@
     | danger:<label>:<model_path>:<danger_model_path>
     | hybrid:<label>:<model_path>[:<belief_kind>]
     | hybridopp:<label>:<model_path>[:<opp_model_path>]
+    | hybridwait:<label>:<model_path>[:<wait_threshold>]
+    | hybridfilter:<label>:<model_path>[:<filter_kind>]
+    | waitdef:<label>:<model_path>
+    | exactdef:<label>:<model_path>
+    | beend:<label>[:<wait_model_path>]
+    | bewait:<label>[:<wait_model_path>]
 
 环境变量：
-    DEALIN_BETA          defensive/oppdef 点炮惩罚系数（默认 2.0）
+    DEALIN_BETA          defensive/oppdef/waitdef/exactdef/hybridfilter 点炮惩罚系数（默认 2.0）
+    WAIT_BETA            waitdef/hybridfilter 待牌概率放大系数（默认 0.5）
+    DEF_BETA             exactdef/hybridfilter defensive EV 放大系数（默认 1.0）
+    WAIT_MODEL_PATH      beend / waitdef / hybridwait 默认待牌模型路径
+    HYBRID_FILTER_KIND   hybridfilter 启用哪种 filter（wait/def/both，默认 both）
+    WAIT_TENPAI_THRESHOLD hybridwait 触发 BeliefExp 的待牌阈值（默认 0.5）
     OPP_BETA             oppdef 听牌概率放大系数（默认 2.0）
     DANGER_BETA          danger 模型惩罚系数（默认 2.0）
     OPP_TENPAI_THRESHOLD hybridopp 触发 BeliefExp 的听牌阈值（默认 0.5）
@@ -57,6 +68,9 @@ class AgentFactory:
             return agent.Agent('Baseline', verbose=False)
         if self.kind == 'beliefexp':
             return BeliefExpectimaxAgent('BeliefExp', verbose=False)
+        if self.kind == 'beliefexp-fast2':
+            return BeliefExpectimaxAgent('BeliefExp-fast2', verbose=False,
+                                         eval_backend='fast2')
         if self.kind == 'be-nn':
             k = int(self.label)
             return BeliefExpectimaxAgent(f'BE-NN-{k}', verbose=False,
@@ -125,6 +139,48 @@ class AgentFactory:
             return HybridNNBeliefOppAgent(f'HybridOpp-{self.label}', nn_model_path=model_path,
                                           opp_model_path=opp_path, device='cpu',
                                           temperature=0.0)
+        if self.kind == 'waitdef':
+            from algo.agents.wait_dist_defensive_agent import WaitDistDefensiveAgent
+            return WaitDistDefensiveAgent(f'WaitDef-{self.label}', model_path=self.path,
+                                          device='cpu', temperature=0.0)
+        if self.kind == 'hybridwait':
+            from algo.agents.hybrid_nn_belief_waitdist_agent import HybridNNBeliefWaitDistAgent
+            # path 格式：model_path:wait_threshold（默认 0.5）
+            if ':' in self.path:
+                model_path, wait_thr = self.path.split(':', 1)
+                wait_thr = float(wait_thr)
+            else:
+                model_path, wait_thr = self.path, None
+            return HybridNNBeliefWaitDistAgent(f'HybridWait-{self.label}', nn_model_path=model_path,
+                                               wait_threshold=wait_thr, device='cpu',
+                                               temperature=0.0)
+        if self.kind == 'exactdef':
+            from algo.agents.exact_defensive_agent import ExactDefensiveAgent
+            return ExactDefensiveAgent(f'ExactDef-{self.label}', model_path=self.path,
+                                       device='cpu', temperature=0.0)
+        if self.kind == 'beend':
+            from algo.agents.belief_endgame_agent import BeliefEndgameAgent
+            # path 格式：可选 wait_model_path
+            wait_path = self.path if self.path else None
+            return BeliefEndgameAgent(f'BEEnd-{self.label}', verbose=False,
+                                      wait_model_path=wait_path,
+                                      max_candidates=8, defense_margin=0.03)
+        if self.kind == 'bewait':
+            from algo.agents.belief_waitdist_agent import BeliefWaitDistAgent
+            wait_path = self.path if self.path else None
+            return BeliefWaitDistAgent(f'BEWait-{self.label}', verbose=False,
+                                       wait_model_path=wait_path,
+                                       max_candidates=8, defense_margin=0.03)
+        if self.kind == 'hybridfilter':
+            from algo.agents.hybrid_nn_belief_filter_agent import HybridNNBeliefFilterAgent
+            # path 格式：model_path:filter_kind（默认 both）
+            if ':' in self.path:
+                model_path, filter_kind = self.path.split(':', 1)
+            else:
+                model_path, filter_kind = self.path, None
+            return HybridNNBeliefFilterAgent(f'HybridFilter-{self.label}', nn_model_path=model_path,
+                                             filter_kind=filter_kind, device='cpu',
+                                             temperature=0.0)
         if self.kind == 'safetenpai':
             return SafetyAwarePPOAgent(f'SafeTenpai-{self.label}', model_path=self.path,
                                        device='cpu', temperature=0.0)
@@ -148,11 +204,14 @@ class AgentFactory:
                                        belief_kind=belief_kind, device='cpu',
                                        temperature=0.0, nn_agent_class=HeuristicResponsePPOAgent)
         if self.kind == 'v3deep':
-            # label = "depth-leaf"（如 "2-eval0" / "2-nn"）
-            depth_s, leaf = self.label.split('-', 1)
+            # label = "depth-leaf[-candpolicy]"（如 "2-eval0" / "2-nn" / "2-nn-bc"）
+            parts = self.label.split('-')
+            depth_s, leaf = parts[0], parts[1]
+            cand_policy = parts[2] if len(parts) > 2 else 'nn'
             return BeliefExpectimaxV3Agent(f'V3d-{self.label}', expectimax_depth=int(depth_s),
                                            max_candidates=5, leaf_evaluator=leaf,
-                                           candidate_policy='nn', candidate_model_path=self.path)
+                                           candidate_policy=cand_policy,
+                                           candidate_model_path=self.path)
         if self.kind == 'v3rlcand':
             return BeliefExpectimaxV3Agent(f'V3-RLcand-{self.label}', expectimax_depth=1,
                                            max_candidates=5, leaf_evaluator='nn',
@@ -168,9 +227,9 @@ class AgentFactory:
 
 
 def _make_factory(token):
-    if token in ('baseline', 'beliefexp', 'v3nnpc'):
+    if token in ('baseline', 'beliefexp', 'v3nnpc', 'beliefexp-fast2'):
         name = {'baseline': 'Baseline', 'beliefexp': 'BeliefExp',
-                'v3nnpc': 'V3-NN-PC'}[token]
+                'v3nnpc': 'V3-NN-PC', 'beliefexp-fast2': 'BeliefExp-fast2'}[token]
         return AgentFactory(token), name
     if token.startswith('v3nnpck:'):
         k = token.split(':', 1)[1]
@@ -179,9 +238,13 @@ def _make_factory(token):
                          ('v3rlunion', 'V3-RLunion-'), ('v3deep', 'V3d-'),
                          ('adapt', 'Adapt-'), ('mctsconv', 'MCTSconv-'),
                          ('defensive', 'Def-'), ('oppdef', 'OppDef-'),
+                         ('waitdef', 'WaitDef-'), ('exactdef', 'ExactDef-'),
+                         ('beend', 'BEEnd-'), ('bewait', 'BEWait-'),
                          ('danger', 'Danger-'), ('hybrid', 'Hybrid-'),
-                         ('hybridopp', 'HybridOpp-'), ('hybridsafe', 'HybridSafe-'),
-                         ('hybridheur', 'HybridHeur-'), ('be-nn', 'BE-NN-')):
+                         ('hybridopp', 'HybridOpp-'), ('hybridwait', 'HybridWait-'),
+                         ('hybridfilter', 'HybridFilter-'),
+                         ('hybridsafe', 'HybridSafe-'), ('hybridheur', 'HybridHeur-'),
+                         ('be-nn', 'BE-NN-')):
         if token.startswith(kind + ':'):
             if kind in ('oppdef', 'hybridopp', 'danger'):
                 parts = token.split(':', 3)
@@ -189,6 +252,11 @@ def _make_factory(token):
                     raise ValueError(f'{kind} token needs 4 parts: {token}')
                 _, label, path, extra_path = parts
                 return AgentFactory(kind, label=label, path=f'{path}:{extra_path}'), f'{prefix}{label}'
+            if kind == 'beend' or kind == 'bewait':
+                parts = token.split(':', 2)
+                label = parts[1]
+                path = parts[2] if len(parts) > 2 else ''
+                return AgentFactory(kind, label=label, path=path), f'{prefix}{label}'
             _, label, path = token.split(':', 2)
             return AgentFactory(kind, label=label, path=path), f'{prefix}{label}'
     raise ValueError(token)

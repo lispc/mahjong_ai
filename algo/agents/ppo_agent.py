@@ -138,7 +138,14 @@ class PPOAgent(BeliefExpectimaxV3Agent):
         x = self._response_features(tile_val)
         with torch.no_grad():
             out = net(x)
-            response_logits = out[-1]  # 最后一个输出是 response_head
+            # response_head 输出 4 维；wait_dist_head 等也是最后输出，不能直接用 [-1]
+            response_logits = None
+            for o in out:
+                if o.shape[-1] == 4:
+                    response_logits = o
+                    break
+            if response_logits is None:
+                return None
         logits = response_logits.squeeze(0).cpu().numpy().astype(np.float64)
         masked = logits + (legal_mask - 1.0) * 1e9
         if self.temperature and self.temperature > 1e-6:

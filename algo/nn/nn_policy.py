@@ -8,6 +8,9 @@ import numpy as np
 from algo.nn.features import extract_features, _TILE_TO_IDX, _IDX_TO_TILE
 
 
+_FORCE_CPU = os.environ.get('FORCE_CPU') == '1'
+
+
 _POLICY_MODEL = None
 _POLICY_CONFIG = None
 _MODEL_CACHE = {}   # weights_path -> (model, config)，支持每实例用不同候选模型
@@ -20,10 +23,19 @@ def _load_policy_model():
     out_dir = 'output'
     config_path = os.path.join(out_dir, 'nn_model_config.json')
     weights_path = os.path.join(out_dir, 'nn_model.pt')
-    if not os.path.exists(config_path) or not os.path.exists(weights_path):
+    # 允许通过环境变量切换默认 policy 模型（例如 MC rollout 用更强的 nn_full_action_best.pt）
+    env_path = os.environ.get('MJ_NN_POLICY_MODEL')
+    if env_path:
+        weights_path = env_path
+        config_path = None  # 让 _load_policy_model_from 自动找 <weights>_config.json 或 fallback
+    if config_path is not None and not os.path.exists(config_path):
         raise FileNotFoundError(
-            f'Policy model not found: {config_path} or {weights_path}. '
+            f'Policy config not found: {config_path}. '
             'Run scripts/train_nn.py first.')
+    if not os.path.exists(weights_path):
+        raise FileNotFoundError(
+            f'Policy model not found: {weights_path}. '
+            'Run scripts/train_nn.py first or set MJ_NN_POLICY_MODEL to a valid path.')
     _POLICY_MODEL, _POLICY_CONFIG = _load_policy_model_from(weights_path, config_path)
     return _POLICY_MODEL, _POLICY_CONFIG
 
@@ -52,7 +64,7 @@ def _load_policy_model_from(weights_path, config_path=None):
             sd = sd['model_state']
     model.load_state_dict(sd)
     model.eval()
-    if torch.cuda.is_available():
+    if not _FORCE_CPU and torch.cuda.is_available():
         model = model.cuda()
     _MODEL_CACHE[key] = (model, config)
     return model, config
@@ -62,7 +74,7 @@ def _policy_scores_core(model, hand14, context, player_name):
     import torch
     features = extract_features(context, hand14, player_name)
     x = torch.tensor(features, dtype=torch.float32).reshape(1, -1)
-    if torch.cuda.is_available():
+    if not _FORCE_CPU and torch.cuda.is_available():
         x = x.cuda()
     with torch.no_grad():
         out = model(x)

@@ -18,7 +18,16 @@ def _hand_to_array(hand, length=34):
 
 
 def _seat(name):
-    return int(name.split('@')[-1]) if '@' in name else 0
+    if '@' not in name:
+        return 0
+    suffix = name.split('@')[-1]
+    digits = ''
+    for ch in suffix:
+        if ch.isdigit():
+            digits += ch
+        else:
+            break
+    return int(digits) if digits else 0
 
 
 def _context_features(agent_context, current_hand14, self_name):

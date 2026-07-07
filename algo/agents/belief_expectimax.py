@@ -58,6 +58,7 @@ class BeliefExpectimaxAgent(agent.Agent):
         max_candidates: eval0 预选后进入 eval2 精确评估的候选数。
         defense_margin: safe_mode 下，允许为安全让步的进攻分数比例。
         tenpai_min_wait: 报听所需的最小待牌剩余张数。
+        eval_backend: 'legacy' 使用 algo.eval2；'fast2' 使用 algo.eval.fast_eval2。
     """
 
     def __init__(self, name, verbose=False,
@@ -66,7 +67,8 @@ class BeliefExpectimaxAgent(agent.Agent):
                  tenpai_min_wait=4,
                  nn_model_path=None,
                  nn_top_k=None,
-                 device='cpu'):
+                 device='cpu',
+                 eval_backend='legacy'):
         super().__init__(name, verbose)
         self.max_candidates = max_candidates
         self.defense_margin = defense_margin
@@ -77,10 +79,13 @@ class BeliefExpectimaxAgent(agent.Agent):
         self.device = device
         self._nn_model = None
         self._nn_extract = None
+        self.eval_backend = eval_backend
+        self._fast_eval = None
 
     def init_tiles(self, l):
         super().init_tiles(l)
         self.context = context_v3.ContextV3()
+        self._fast_eval = None
 
     def handle_msg(self, msg):
         if msg.type == 'put':
@@ -94,6 +99,18 @@ class BeliefExpectimaxAgent(agent.Agent):
         c = ctx_module.Context()
         c.used = self.context.used.copy()
         return c
+
+    def _get_fast_eval(self):
+        if self._fast_eval is None:
+            from algo.eval.fast_eval2 import FastEval2
+            self._fast_eval = FastEval2(self.context)
+        return self._fast_eval
+
+    def _eval2(self, hand13):
+        if self.eval_backend == 'fast2':
+            fe = self._get_fast_eval()
+            return fe.eval2(hand13)
+        return algo.eval2(hand13, self._legacy_context())
 
     def declare_tenpai(self, hand, context):
         """听牌且待牌足够好时才报听。"""
@@ -190,7 +207,7 @@ class BeliefExpectimaxAgent(agent.Agent):
         danger_map = {}
         for disc in top:
             hand13 = self._remove_one(self.cur, disc)
-            offense = algo.eval2(hand13, type_ctx)
+            offense = self._eval2(hand13)
             danger = opponent.tile_danger(disc, self.context, self.name)
             evaluated.append((offense, danger, disc))
             score_map[disc] = float(offense)

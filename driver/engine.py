@@ -168,7 +168,7 @@ def _tenpai_check(current, locked_names, locked, event_log, record_log,
                         ag.context.declare_tenpai(current.name)
 
 
-def play_game(agents, tile_pool_cls=None, verbose=False, record_time=False,
+def play_game(agents, tile_pool_cls=None, seed=None, verbose=False, record_time=False,
               record_log=False, state_callback=None):
     """
     Play one game with four agents.
@@ -184,7 +184,7 @@ def play_game(agents, tile_pool_cls=None, verbose=False, record_time=False,
     """
     if tile_pool_cls is None:
         tile_pool_cls = tile_pool.Pool
-    pool = tile_pool_cls()
+    pool = tile_pool_cls(seed=seed)
 
     for agent in agents:
         agent.init_tiles(pool.next_n(13))
@@ -270,6 +270,7 @@ def play_game(agents, tile_pool_cls=None, verbose=False, record_time=False,
                 'skip_draw': skip_draw,
                 'locked_names': set(locked_names),
                 'wall_remaining': wall_remaining(),
+                'wall': pool.tiles[pool.idx:],
             })
 
         discarded, dt, locked = _discard_step(

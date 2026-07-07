@@ -1,5 +1,6 @@
 from collections import defaultdict
 import copy
+from functools import lru_cache
 from utils import *
 import tile
 import operator
@@ -130,6 +131,11 @@ class State:
         return results
 
 
+@lru_cache(maxsize=1_000_000)
+def _eval_suit_cached(suit_tuple):
+    return eval_suit(list(suit_tuple))
+
+
 def eval_suit(l):
     r = EvalResult()
     last_tile = None
@@ -168,6 +174,11 @@ def eval_seq(c):
                 assert False, 'wtf' + repr(item)
         result.append((three_count, two_count))
     return EvalResult.from_list(result)
+
+
+@lru_cache(maxsize=1_000_000)
+def _eval_honors_cached(honor_tuple):
+    return eval_honors(list(honor_tuple))
 
 
 def to_slice(i, max_len=3):
@@ -273,8 +284,8 @@ def eval_naive(l):
     splits = tile.split_by_category(l)
     result = EvalResult()
     for item in splits[:3]:
-        result.merge(eval_suit(item))
-    result.merge(eval_honors(splits[-1]))
+        result.merge(_eval_suit_cached(tuple(sorted(item))))
+    result.merge(_eval_honors_cached(tuple(sorted(splits[-1]))))
     return result
 
 
@@ -282,7 +293,8 @@ def is_succ(l):
     return eval_naive(l).is_succ()
 
 
-from functools import lru_cache
+# tile id -> index in 0..33
+_TILE_TO_IDX = {t: i for i, t in enumerate(_TILE_IDS)}
 
 
 @lru_cache(maxsize=1_000_000)
@@ -297,30 +309,47 @@ def _eval0_cached(counts_tuple):
 
 def _eval0_key(tiles):
     """用于 eval0 缓存的规范 key：34 维数量元组。"""
-    c = count(tiles)
-    return tuple(c.get(t, 0) for t in _TILE_IDS)
+    c = [0] * 34
+    for t in tiles:
+        c[_TILE_TO_IDX[t]] += 1
+    return tuple(c)
+
+
+def eval0_counts(counts_tuple, c=_DEFAULT_CONTEXT):
+    return _eval0_cached(counts_tuple)
 
 
 def eval0(l, c=_DEFAULT_CONTEXT):
-    return _eval0_cached(_eval0_key(l))
+    try:
+        from algo.eval import _fast_eval0
+        return _fast_eval0.eval0_metric_tiles(l)
+    except Exception:
+        return _eval0_cached(_eval0_key(l))
 
 
-def eval_rec(tiles, f, c=_DEFAULT_CONTEXT, verbose=False):
+def eval_rec(tiles_or_counts, f, c=_DEFAULT_CONTEXT, verbose=False):
     if verbose:
         print('所有牌')
-        print(tile.display_tiles(tiles))
+        print(tile.display_tiles(tiles_or_counts))
 
     # 避免原地修改默认的模块级 Context 单例
     if c is _DEFAULT_CONTEXT:
         c = context.Context()
 
-    prob = c.tile_prob(tiles)
-    base_metric = f(tiles, c)
+    if isinstance(tiles_or_counts, tuple) and len(tiles_or_counts) == 34:
+        counts = tiles_or_counts
+        prob = c.tile_prob_counts(counts)
+    else:
+        counts = _eval0_key(tiles_or_counts)
+        prob = c.tile_prob(tiles_or_counts)
+
+    base_metric = f(counts, c)
     final_metric = 0
     for k in prob:
-        # 原代码 deepcopy context 但实际 eval_rec 并不会修改 used；
-        # 直接复用同一个 context 即可，避免拷贝开销。
-        metric = f(tiles + [k], c)
+        idx = _TILE_TO_IDX[k]
+        new_counts = list(counts)
+        new_counts[idx] += 1
+        metric = f(tuple(new_counts), c)
         final_metric += prob[k] * metric
         if verbose:
             print('摸牌:', tile.tile_to_str(k), '概率', prob[k], '得分', '%.2f'%base_metric,'+', '%.2f'%(metric-base_metric))
@@ -329,12 +358,22 @@ def eval_rec(tiles, f, c=_DEFAULT_CONTEXT, verbose=False):
     return final_metric
 
 
+def eval1_counts(counts_tuple, c=context.Context()):
+    return eval_rec(counts_tuple, eval0_counts, c)
+
+
 def eval1(tiles, c=context.Context()):
-    return eval_rec(tiles, eval0, c)
+    return eval_rec(tiles, eval0_counts, c)
+
+
+def eval2_counts(counts_tuple, c=context.Context()):
+    return eval_rec(counts_tuple, eval1_counts, c)
 
 
 def eval2(tiles, c=context.Context()):
-    return eval_rec(tiles, eval1, c)
+    if isinstance(tiles, tuple) and len(tiles) == 34:
+        return eval2_counts(tiles, c)
+    return eval_rec(tiles, eval1_counts, c)
 
 
 def select(tiles, with_prob=True, metric_f=eval2, c=context.Context()):
