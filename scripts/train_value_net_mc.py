@@ -6,6 +6,7 @@ import sys
 import os
 import time
 import json
+import argparse
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -34,13 +35,24 @@ def evaluate(model, X_val, yv_val, batch_size=1024):
 
 
 def main():
-    data_path = sys.argv[1] if len(sys.argv) > 1 else 'output/nn_training_data_mc.npz'
-    epochs = int(sys.argv[2]) if len(sys.argv) > 2 else 80
-    batch_size = int(sys.argv[3]) if len(sys.argv) > 3 else 256
-    lr = float(sys.argv[4]) if len(sys.argv) > 4 else 1e-3
-    hidden_dims_str = sys.argv[5] if len(sys.argv) > 5 else '512,256,128'
-    hidden_dims = [int(x) for x in hidden_dims_str.split(',')]
-    wd = float(sys.argv[6]) if len(sys.argv) > 6 else 0.0
+    parser = argparse.ArgumentParser()
+    parser.add_argument('data_path', nargs='?', default='output/nn_training_data_mc.npz')
+    parser.add_argument('epochs', nargs='?', type=int, default=80)
+    parser.add_argument('batch_size', nargs='?', type=int, default=256)
+    parser.add_argument('lr', nargs='?', type=float, default=1e-3)
+    parser.add_argument('hidden_dims', nargs='?', default='512,256,128')
+    parser.add_argument('wd', nargs='?', type=float, default=0.0)
+    parser.add_argument('--out', default='output/nn_value_model_mc',
+                        help='output prefix for .pt and .json (default: output/nn_value_model_mc)')
+    args = parser.parse_args()
+
+    data_path = args.data_path
+    epochs = args.epochs
+    batch_size = args.batch_size
+    lr = args.lr
+    hidden_dims = [int(x) for x in args.hidden_dims.split(',')]
+    wd = args.wd
+    out_prefix = args.out
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'Using device: {device}')
@@ -77,8 +89,10 @@ def main():
     criterion = nn.MSELoss()
 
     best_val_loss = float('inf')
-    out_dir = 'output'
+    out_dir = os.path.dirname(out_prefix) or 'output'
     os.makedirs(out_dir, exist_ok=True)
+    out_pt = out_prefix + '.pt'
+    out_json = out_prefix + '_config.json'
 
     for epoch in range(1, epochs + 1):
         start = time.time()
@@ -110,13 +124,13 @@ def main():
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            torch.save(model.state_dict(), os.path.join(out_dir, 'nn_value_model_mc.pt'))
-            with open(os.path.join(out_dir, 'nn_value_model_mc_config.json'), 'w') as f:
+            torch.save(model.state_dict(), out_pt)
+            with open(out_json, 'w') as f:
                 json.dump({'input_dim': int(X.shape[1]), 'arch': 'deep',
                            'hidden_dims': hidden_dims, 'framework': 'pytorch'}, f)
-            print('  -> saved best MC value model')
+            print(f'  -> saved best MC value model to {out_pt}')
 
-    print('Training complete. Best MC value model at output/nn_value_model_mc.pt')
+    print(f'Training complete. Best MC value model at {out_pt}')
 
 
 if __name__ == '__main__':

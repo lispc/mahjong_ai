@@ -934,3 +934,82 @@ MC value 放大时，GPU 多进程 nnpolicy rollout 导致 CUDA 死锁：大量 
 - 数据文件（`selfplay_raw_3750.pkl`、50k 样本）已落盘，重启后不丢失。
 
 ---
+
+## 10. Path A/B 最终结果与下一步（2026-07-07）
+
+### Path A：nnpolicy MC value label → **阴性**
+
+重启后用 CPU-only `nnpolicy` rollout 完成 50,815 样本的 MC value label 计算（耗时 372s，0 bad）。
+训练更大的 deep value net（1024/512/256），best val_loss 仅 0.8040，随后严重过拟合。
+50 局 benchmark（`EXACT_DEPTH2=1`，`MJ_NN_VALUE_MODEL=output/nn_value_model_mc_nnpolicy_3750.pt`）：
+
+| Agent | win | deal-in | Elo |
+|---|---|---|---|
+| V3d-2-nn-baseline_eval1 | 16.0% | 30.0% | 1437 |
+| Hybrid-Best | 36.0% | 10.0% | 1533 |
+
+**结论**：nnpolicy rollout 4 rollouts 的 label 噪声太大，训出的 value net 当 leaf 明显弱于 baseline。Path A 放弃。
+
+### Path B：exact depth-2 search distillation → **阴性**
+
+#### B1. 250 局 pilot（leaf=nn，exact depth-2）
+
+- 输出：`output/nn_search_value_v3d2_exact_250.npz`，11,932 样本。
+- 耗时 4,233s（≈70 分钟）。
+- 训练 policy/value distill student 后 100 局 benchmark：policy 12% win，value 13% win，均弱于 baseline。
+
+#### B2. 5,000 局放大（leaf=eval0，depth=2，baseline_eval1 candidate）
+
+为加速，把 leaf 从 `nn` 换成 `eval0`，workers 从 4 提到 32，并新增 `--games-per-task 10` 做频繁 checkpoint。
+
+- 输出：`output/nn_search_value_v3d2_eval0_5000.npz`，**238,882 样本**。
+- 耗时 39,297s（≈10.9 小时）。
+- Value 分布：`mean=4.103, std=4.796, min=0.000, max=100.000`。
+
+训练结果：
+
+| 方法 | 数据量 | val disc acc / value MSE | 100/400 局 win | deal-in |
+|---|---|---|---|---|
+| BC policy distill | 238k | 0.745 | 9.0% | 26.0% |
+| Value distill (leaf) | 238k | MSE ~28 | 15.0% | 21.0% |
+| DPO ranking distill | 238k | 0.681 | 13.0% | 28.0% |
+
+三种蒸馏全部失败，且扩大数据没有帮助。
+
+#### B3. Teacher 本身强度验证
+
+关键对照：让 exact depth-2 search agent 自己下场打。
+
+| Agent | 局数 | win | deal-in | Elo |
+|---|---|---|---|---|
+| V3d-2-eval0-baseline_eval1 | 50 | 28.0% | 14.0% | **1606** |
+| V3d-2-eval0-baseline_eval1 | **400** | **17.5%** | **19.5%** | **1457** |
+| Hybrid-Best | 400 | 34.0% | 17.0% | 1625 |
+| Baseline | 400 | 22.8% | 23.5% | 1446 |
+
+50 局结果不可信；400 局显示 **depth-2 + eval0 leaf 的 teacher 实际只略强于 Baseline，远不如 Hybrid-Best**。
+
+**核心结论**：
+- 不是蒸馏方法问题，而是 **teacher 本身不够强**。
+- eval0 leaf 把 depth-2 search 的叶子估值质量拉低，导致搜索无法超过 Hybrid-Best（depth-1 + nn leaf + belief）。
+- 要让 depth-2 search 成为更强 teacher，必须用 **nn leaf**（或比 eval0 更强的 leaf）。
+
+### 下一步
+
+**启动 depth-2 + nn leaf 长期数据生成**。预期极慢（单局可能 >10 分钟），允许跑几天。
+
+计划配置：
+- 5,000 局 exact depth-2 search，leaf=`nn`，candidate=`baseline_eval1`。
+- 分 4 个 GPU 并行，每 GPU 1,250 局、8 workers，seed-bases 850000/851250/852500/853750。
+- 输出：`output/nn_search_value_v3d2_nn_5000_gpu{0,1,2,3}.npz`，最后合并。
+- 脚本：`scripts/rl/gen_search_value_data.py`（已支持 `--games-per-task` 断点续跑）。
+
+若该 teacher 经 benchmark 验证明显强于 Hybrid-Best，再投资蒸馏；否则考虑回到 Fable-5 其他方向（Cython 化 eval2、wait_dist、exact endgame defensive head 等）。
+
+新增/修改脚本：
+- `scripts/rl/gen_search_value_data.py`：新增 `--games-per-task` 参数，支持细粒度断点续跑。
+- `scripts/rl/distill_search.py`：从 backbone 初始化，联合训练 policy + value head 的蒸馏脚本。
+- `scripts/rl/distill_search_dpo.py`：search-policy 的 DPO/ranking 蒸馏脚本（随机 rejected action）。
+- `scripts/train_value_net_mc.py`：新增 `--out` 参数，避免覆盖默认 `nn_value_model_mc.pt`。
+
+---

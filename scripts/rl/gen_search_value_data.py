@@ -94,40 +94,76 @@ def main():
     parser.add_argument('--max-candidates', type=int, default=5)
     parser.add_argument('--seed-base', type=int, default=700000)
     parser.add_argument('--save-every', type=int, default=0,
-                        help='if >0, save checkpoint every N games')
+                        help='if >0, each worker saves partial npz every N games (unused in main process)')
+    parser.add_argument('--games-per-task', type=int, default=10,
+                        help='split total games into smaller tasks of this size for frequent checkpointing')
     args = parser.parse_args()
 
     from concurrent.futures import ProcessPoolExecutor, as_completed
 
     n_games = args.n_games
     workers = args.workers
-    games_per_worker = max(1, n_games // workers)
+    games_per_task = max(1, args.games_per_task)
     tasks = []
-    total_assigned = 0
-    for w in range(workers):
-        ng = games_per_worker
-        if w == workers - 1:
-            ng = n_games - total_assigned
-        if ng <= 0:
-            break
-        tasks.append((ng, args.seed_base + total_assigned))
-        total_assigned += ng
+    for start in range(0, n_games, games_per_task):
+        ng = min(games_per_task, n_games - start)
+        tasks.append((ng, args.seed_base + start))
 
+    # 断点续跑：checkpoint 保存已完成的 seed_base 和当前数据
+    checkpoint_path = args.output + '.checkpoint.npz'
+    completed_seed_bases = set()
     all_X, all_v, all_a = [], [], []
+    if os.path.exists(checkpoint_path):
+        try:
+            d = np.load(checkpoint_path)
+            all_X = [d['X']]
+            all_v = [d['v']]
+            all_a = [d['a']]
+            completed_seed_bases = set(int(x) for x in d['completed_seed_bases'])
+            print(f'Resuming from checkpoint: {len(completed_seed_bases)}/{len(tasks)} tasks done, '
+                  f'{sum(len(x) for x in all_v)} samples', flush=True)
+        except Exception as e:
+            print(f'Failed to load checkpoint: {e}, starting from scratch', flush=True)
+            all_X, all_v, all_a = [], [], []
+            completed_seed_bases = set()
+
+    pending_tasks = [t for t in tasks if t[1] not in completed_seed_bases]
+    if not pending_tasks:
+        print('All tasks already completed in checkpoint', flush=True)
+
+    def _save_checkpoint():
+        if not all_X:
+            return
+        X = np.concatenate(all_X, axis=0)
+        v = np.concatenate(all_v, axis=0)
+        a = np.concatenate(all_a, axis=0)
+        np.savez(checkpoint_path, X=X, v=v, a=a,
+                 completed_seed_bases=np.array(sorted(completed_seed_bases), dtype=np.int64))
+        print(f'  -> checkpoint saved: {len(completed_seed_bases)}/{len(tasks)} tasks, '
+              f'{len(v)} samples', flush=True)
+
     t0 = time.time()
     with ProcessPoolExecutor(max_workers=workers,
                              initializer=_init_worker,
                              initargs=(args.depth, args.leaf, args.cand, args.cand_policy, args.max_candidates)) as executor:
-        futures = {executor.submit(_worker, t): t for t in tasks}
+        futures = {executor.submit(_worker, t): t for t in pending_tasks}
         for future in as_completed(futures):
             res = future.result()
+            task = futures[future]
+            completed_seed_bases.add(task[1])
             if res is None:
+                _save_checkpoint()
                 continue
             all_X.append(res['X'])
             all_v.append(res['v'])
             all_a.append(res['a'])
             n = sum(len(x) for x in all_v)
-            print(f'  collected {n} samples so far ...')
+            print(f'  collected {n} samples so far ...', flush=True)
+            _save_checkpoint()
+
+    if not all_X:
+        print('No data collected', flush=True)
+        return
 
     X = np.concatenate(all_X, axis=0)
     v = np.concatenate(all_v, axis=0)
@@ -137,6 +173,9 @@ def main():
     print(f'Value mean={v.mean():.3f} std={v.std():.3f} min={v.min():.3f} max={v.max():.3f}')
     np.savez(args.output, X=X, v=v, a=a)
     print(f'Saved to {args.output}')
+    if os.path.exists(checkpoint_path):
+        os.remove(checkpoint_path)
+        print(f'Removed checkpoint {checkpoint_path}')
 
 
 if __name__ == '__main__':
