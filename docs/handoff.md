@@ -74,7 +74,7 @@ PYTHONPATH=. python3 scripts/rl/benchmark_duplicate.py \
 
 ---
 
-## 4. 项目状态（2026-07-08）
+## 4. 项目状态（2026-07-08）——**暂停**
 
 ### 已验证成功
 - **NN + BeliefExp Hybrid**（当前最强框架）
@@ -84,10 +84,14 @@ PYTHONPATH=. python3 scripts/rl/benchmark_duplicate.py \
 - **Path A：nnpolicy MC rollout value labels** —— 4-rollouts label 噪声太大，value net 弱于 baseline。
 - **Path B：exact depth-2 search distillation** —— depth-2 expectimax（leaf=eval0 或 leaf=nn）均未能产生强于 Hybrid-Best 的 teacher，三种蒸馏方法（BC policy/value、DPO）全部阴性。
   - 详见 `docs/reports/search_distillation_report.md`
+- **Cython 化 eval2 / expectimax** —— eval2 单 call 从 8.88 ms 降到 1.31 ms（6.8×），V3d-2-eval0 一局从 ~140 s 降到 ~103 s，但 teacher 强度没有提升（100 局 18% win，仍远弱于 Hybrid-Best）。说明 depth-2 search 不强是 leaf value / 候选空间问题，不是纯速度问题。
+- **Exact endgame defensive head** —— 用 13,843 精确终局标签训练 standalone defensive head，val MSE 0.054，但 standalone agent 仅 11% win / 22% deal-in（100 局）。更适合作为 Hybrid agent 的终盘切换组件，而非独立使用。
 
-### 正在执行 / 下一步
-1. **Cython 化 eval2 / expectimax**：把搜索热路径 Cython 化，复活深度 search 并尝试蒸馏。
-2. **Exact endgame defensive head**：用已有的 13,843 精确终局标签训练 defensive decision head。
+### 项目暂停
+当前框架内连续多个方向验证失败，继续同维度尝试的预期收益极低。**项目暂停**，后续若重启，优先方向：
+1. 把 exact endgame defensive head 集成到 `HybridNNBeliefAgent` 做终盘切换；
+2. 生成更多 exact endgame / wait_dist 数据，重新训练辅助 head；
+3. 引入外部高水平对局数据或更大规模模型集成。
 
 详细历史记录、所有实验数据与产物见 `docs/reports/project_history.md`。
 

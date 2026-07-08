@@ -373,6 +373,16 @@ def eval2_counts(counts_tuple, c=context.Context()):
 def eval2(tiles, c=context.Context()):
     if isinstance(tiles, tuple) and len(tiles) == 34:
         return eval2_counts(tiles, c)
+    # 优先使用 Cython 加速版本
+    try:
+        from algo.eval import _fast_eval0
+        used_tiles = []
+        if c is not None and hasattr(c, 'all_tiles_as_dict'):
+            d = c.all_tiles_as_dict()
+            used_tiles = [t for t, cnt in d.items() for _ in range(int(cnt))]
+        return _fast_eval0.eval2_metric_tiles(tiles, used_tiles)
+    except Exception:
+        pass
     return eval_rec(tiles, eval1_counts, c)
 
 

@@ -158,6 +158,10 @@ class AgentFactory:
             from algo.agents.exact_defensive_agent import ExactDefensiveAgent
             return ExactDefensiveAgent(f'ExactDef-{self.label}', model_path=self.path,
                                        device='cpu', temperature=0.0)
+        if self.kind == 'exactend':
+            from algo.agents.exact_endgame_defensive_agent import ExactEndgameDefensiveAgent
+            return ExactEndgameDefensiveAgent(f'ExactEnd-{self.label}', model_path=self.path,
+                                              device='cpu', temperature=0.0)
         if self.kind == 'beend':
             from algo.agents.belief_endgame_agent import BeliefEndgameAgent
             # path 格式：可选 wait_model_path
@@ -239,6 +243,7 @@ def _make_factory(token):
                          ('adapt', 'Adapt-'), ('mctsconv', 'MCTSconv-'),
                          ('defensive', 'Def-'), ('oppdef', 'OppDef-'),
                          ('waitdef', 'WaitDef-'), ('exactdef', 'ExactDef-'),
+                         ('exactend', 'ExactEnd-'),
                          ('beend', 'BEEnd-'), ('bewait', 'BEWait-'),
                          ('danger', 'Danger-'), ('hybrid', 'Hybrid-'),
                          ('hybridopp', 'HybridOpp-'), ('hybridwait', 'HybridWait-'),
