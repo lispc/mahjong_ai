@@ -74,24 +74,47 @@ PYTHONPATH=. python3 scripts/rl/benchmark_duplicate.py \
 
 ---
 
-## 4. 项目状态（2026-07-08）——**暂停**
+## 4. 项目状态（2026-07-16）——**已重启，方向 0 完成**
 
-### 已验证成功
-- **NN + BeliefExp Hybrid**（当前最强框架）
-- **Model Soup + 蒸馏回单一模型**（产出 `output/nn_full_action_best.pt`）
+### 方向 0：评测校准（完成，结论重大）
 
-### 已验证失败（近期重点）
-- **Path A：nnpolicy MC rollout value labels** —— 4-rollouts label 噪声太大，value net 弱于 baseline。
-- **Path B：exact depth-2 search distillation** —— depth-2 expectimax（leaf=eval0 或 leaf=nn）均未能产生强于 Hybrid-Best 的 teacher，三种蒸馏方法（BC policy/value、DPO）全部阴性。
-  - 详见 `docs/reports/search_distillation_report.md`
-- **Cython 化 eval2 / expectimax** —— eval2 单 call 从 8.88 ms 降到 1.31 ms（6.8×），V3d-2-eval0 一局从 ~140 s 降到 ~103 s，但 teacher 强度没有提升（100 局 18% win，仍远弱于 Hybrid-Best）。说明 depth-2 search 不强是 leaf value / 候选空间问题，不是纯速度问题。
-- **Exact endgame defensive head** —— 用 13,843 精确终局标签训练 standalone defensive head，val MSE 0.054，但 standalone agent 仅 11% win / 22% deal-in（100 局）。更适合作为 Hybrid agent 的终盘切换组件，而非独立使用。
+- **fable-5 的「duplicate 下 Baseline 强于 best」是 benchmark bug**（同名前缀匹配误计），
+  非事实。重算全部历史 pkl：**Hybrid-Best − Baseline = +9.4% [+8.0,+10.9]（5000 pairs）、
+  − BeliefExp = +10.4% [+9.0,+11.8]**，best 链条有效。
+- soup→蒸馏最后一环证伪：NewBest − OldBest = +0.2% [−0.5,+0.9]（5000 pairs），同强。
+- **晋升/放弃决策一律按 `docs/eval-protocol.md`**（5000-pair duplicate arena、paired win
+  diff CI 不含 0 + 独立种子复跑、score-proxy 辅指标；Elo 不作依据）。
+- 详见 `docs/reports/duplicate-reanalysis-0716.md`。
 
-### 项目暂停
-当前框架内连续多个方向验证失败，继续同维度尝试的预期收益极低。**项目暂停**，后续若重启，优先方向：
-1. 把 exact endgame defensive head 集成到 `HybridNNBeliefAgent` 做终盘切换；
-2. 生成更多 exact endgame / wait_dist 数据，重新训练辅助 head；
-3. 引入外部高水平对局数据或更大规模模型集成。
+### 方向 A/B：终盘精确求解 + 待牌分布（已判死，证据链完整）
+
+- hybridend（Hybrid 接 exact solver 搜索层）vs hybrid：5000 pairs 统计无差异（99.9% ties）。
+- **oracle gate（完美待牌上界）：2000 pairs −0.1%，仅 1 局差异**——信息完美也无增量，
+  待牌预测质量不是瓶颈，方向 B 前提不成立。
+- 机制分析：exact solver 触发 ~0.16 次/agent-game，BeliefExp 首选落入真实待牌集合
+  仅 1/120 agent-games——**对已报听者的防守 BeliefExp 已接近最优**。
+- 误差分解（200 局 event_log）：**82% 点炮送给默听（未报听）玩家**；
+  BeliefExp 对已报听者 0 失误。防守前沿在**中盘默听检测**（方向 D 接手）。
+- 详见 `docs/reports/endgame-solver-ab-0716.md`。
+
+### 方向 C/D：探索收尾（2026-07-16）
+
+- **C（外部数据）判死**：公开牌谱仅天凤（日麻）/MCR 自对弈，无晋北同规则数据，
+  跨规则迁移目标函数冲突。
+- **D（默听检测 + 序列特征）**：离线检测已解决（GRU 序列编码 + 混合池数据，
+  silent AUC 0.919，seq 稳定优于纯计数特征 +0.09~0.18），但在线接入经
+  `_danger_signal` + wait-danger 不转化为胜率：唯一 1000-pair 筛查命中
+  （+1.0%）在 5000-pair 独立种子复跑中消失（+0.1% [−0.4,+0.5]），
+  阈值趋势非单调。**协议的多重比较防护首次实战拦截 winner's curse**。
+  方向关闭，详见 `docs/reports/silent-tenpai-d-0716.md`。
+- 「教师更强则 trace 蒸馏」：A/B/D 均未产出更强教师，跳过。
+
+### 此前状态（2026-07-08，暂停时记录）
+
+已验证成功：NN + BeliefExp Hybrid（当前最强框架）；Model Soup + 蒸馏回单一模型。
+已验证失败：Path A（nnpolicy MC rollout value labels）、Path B（exact depth-2 search
+distillation）、Cython 化 eval2/expectimax（提速 6.8× 但 teacher 不强）、exact endgame
+defensive head（standalone 弱，val MSE 0.054 但 100 局仅 11% win）。
 
 详细历史记录、所有实验数据与产物见 `docs/reports/project_history.md`。
 

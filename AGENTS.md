@@ -193,7 +193,7 @@ HybridNNBeliefAgent(
 
 128k 行为克隆与 DPO/PPO/KTO 等后续实验均**未稳定超越**当前 SoupDistilled best；第二轮 soup/蒸馏 bootstrap 也已边际递减。详见 `docs/handoff.md §6.10–§6.14`。
 
-> **2026-07-06 重要更新**：新增 duplicate（复式）赛制评测后，发现固定 position 0 的考场中 Baseline 显著强于当前 best（paired A−B = −20.2%，95% CI 不含 0）。普通 tournament 中 Hybrid 仍然更强，说明座位/发牌运气是巨大混淆因素。在晋升/放弃决策前，建议先用 `scripts/rl/benchmark_duplicate.py` 建立固定标准考场并复测候选。
+> **2026-07-16 重要更正**：此前（07-06）记录的「duplicate 考场中 Baseline 显著强于当前 best（paired −20.2%）」是 **benchmark 脚本配对统计 bug**（候选与对手同名时前缀匹配误计），并非事实。用席位识别重算全部历史 pkl 后结论反转：**Hybrid-Best 在 duplicate 下显著强于 Baseline（+9.4%，5000 pairs）与 BeliefExp（+10.4%）**。但 soup→蒸馏这最后一环被证伪：NewBest vs OldBest 5000 pairs 仅 +0.2% [−0.5,+0.9]，score-proxy 亦为零——属 winner's curse，两模型视为同强。详见 `docs/reports/duplicate-reanalysis-0716.md`。**晋升/放弃决策一律按 `docs/eval-protocol.md`**：5000-pair duplicate arena、paired win diff CI 不含 0、独立种子复跑；Elo 不作依据。
 
 ---
 
@@ -217,6 +217,15 @@ HybridNNBeliefAgent(
 - `scripts/rl/train_large_model.py`：启动 large SE/attention 训练
 - `scripts/rl/summarize_hpo.py`：汇总 HPO 训练日志
 - `scripts/rl/make_model_soup.py`：同架构 checkpoint 权重平均
+- `scripts/rl/gen_seq_opp_data.py`：对手序列数据生成（--mix 混合池，shard 断点续跑）
+- `scripts/rl/train_seq_opp_model.py`：默听/待牌序列模型训练（seq/no-seq 消融，all/silent 拆分指标）
+- `scripts/rl/oracle_endgame_gate.py`：完美待牌上界实验（方向 A/B 判死的关键证据）
+- `scripts/rl/benchmark_duplicate.py`：duplicate 配对 benchmark（席位识别 + score-proxy 配对差）
+
+新增 agent（benchmark_pool token）：
+- `hybridend:` = HybridNNBeliefEndgameAgent（Hybrid 接 exact-solver 搜索层，已证无增量）
+- `besilent:` = BeliefSilentGuardAgent（BeliefExp + 序列模型默听防守）
+- `hybridsilent:` = HybridNNBesilentAgent（Hybrid 接静默守卫搜索层）
 
 ### 5.2 数据文件
 
@@ -340,8 +349,10 @@ PYTHONPATH=. python3 scripts/rl/train_wait_dist.py \
 5. **`mc_value._greedy_discard` 返回 tile**：`algo.select(...)[0]` 返回的是 `(metric, tile)` 元组，取 tile 要用 `[0][1]`。
 6. **`MJ_NN_POLICY_MODEL` 环境变量**：`algo/nn/nn_policy.py` 支持通过该变量切换默认 policy 模型（例如 MC rollout 的 `nnpolicy` 模式想使用 `output/nn_full_action_best.pt` 时设置）。
 7. **tournament 默认只用一个 GPU**：大规模 benchmark 时若 GPU 0 成为瓶颈，用 `scripts/benchmark_4gpu.sh` 拆 4 进程。
-7. **输出目录 `output/` 被 gitignore，但 config json 被跟踪**：修改模型配置后记得提交 `.json` 文件。
-8. **不要提交 `.venv/`**：已加入 `.gitignore`。
+8. **输出目录 `output/` 被 gitignore，但 config json 被跟踪**：修改模型配置后记得提交 `.json` 文件。
+9. **不要提交 `.venv/`**：已加入 `.gitignore`。
+10. **`tests/legacy_test.py` 已知失败（2026-07 起）**：`test_select` 断言 `select()[:2] == [2, 22]`，实际返回 `[22, 2]`——Cython eval2 集成（commit `05a303e`）后同分候选的 tie-break 顺序变化所致，**与强度无关**（同分值），clean tree 上同样失败。如需消除，把断言改为集合比较；勿为此改动 legacy eval 语义（Baseline 依赖 `algo.select`）。
+11. **HybridNNBeliefAgent 无 `.context` 属性**：引擎 `getattr(agent, 'context', None)` 得 None，导致 Hybrid 在对战中**从不报听**（PPOAgent tenpai head 被跳过）。引擎无报听计分，当前评测目标下无碍；接入计分前需重新评估（见 `docs/eval-protocol.md` §1 备注）。
 
 ---
 

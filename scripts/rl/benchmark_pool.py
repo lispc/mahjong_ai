@@ -169,6 +169,13 @@ class AgentFactory:
             return BeliefEndgameAgent(f'BEEnd-{self.label}', verbose=False,
                                       wait_model_path=wait_path,
                                       max_candidates=8, defense_margin=0.03)
+        if self.kind == 'besilent':
+            from algo.agents.belief_silent_guard_agent import BeliefSilentGuardAgent
+            # path 格式：可选 seq_model_path
+            seq_path = self.path if self.path else None
+            return BeliefSilentGuardAgent(f'BESilent-{self.label}', verbose=False,
+                                          seq_model_path=seq_path,
+                                          max_candidates=8, defense_margin=0.03)
         if self.kind == 'bewait':
             from algo.agents.belief_waitdist_agent import BeliefWaitDistAgent
             wait_path = self.path if self.path else None
@@ -185,6 +192,26 @@ class AgentFactory:
             return HybridNNBeliefFilterAgent(f'HybridFilter-{self.label}', nn_model_path=model_path,
                                              filter_kind=filter_kind, device='cpu',
                                              temperature=0.0)
+        if self.kind == 'hybridend':
+            from algo.agents.hybrid_nn_belief_endgame_agent import HybridNNBeliefEndgameAgent
+            # path 格式：model_path[:wait_model_path]
+            if ':' in self.path:
+                model_path, wait_path = self.path.split(':', 1)
+            else:
+                model_path, wait_path = self.path, None
+            return HybridNNBeliefEndgameAgent(f'HybridEnd-{self.label}', nn_model_path=model_path,
+                                              wait_model_path=wait_path, device='cpu',
+                                              temperature=0.0)
+        if self.kind == 'hybridsilent':
+            from algo.agents.hybrid_nn_besilent_agent import HybridNNBesilentAgent
+            # path 格式：model_path[:seq_model_path]
+            if ':' in self.path:
+                model_path, seq_path = self.path.split(':', 1)
+            else:
+                model_path, seq_path = self.path, None
+            return HybridNNBesilentAgent(f'HybridSil-{self.label}', nn_model_path=model_path,
+                                         seq_model_path=seq_path, device='cpu',
+                                         temperature=0.0)
         if self.kind == 'safetenpai':
             return SafetyAwarePPOAgent(f'SafeTenpai-{self.label}', model_path=self.path,
                                        device='cpu', temperature=0.0)
@@ -245,9 +272,11 @@ def _make_factory(token):
                          ('waitdef', 'WaitDef-'), ('exactdef', 'ExactDef-'),
                          ('exactend', 'ExactEnd-'),
                          ('beend', 'BEEnd-'), ('bewait', 'BEWait-'),
+                         ('besilent', 'BESilent-'),
                          ('danger', 'Danger-'), ('hybrid', 'Hybrid-'),
                          ('hybridopp', 'HybridOpp-'), ('hybridwait', 'HybridWait-'),
-                         ('hybridfilter', 'HybridFilter-'),
+                         ('hybridfilter', 'HybridFilter-'), ('hybridend', 'HybridEnd-'),
+                         ('hybridsilent', 'HybridSil-'),
                          ('hybridsafe', 'HybridSafe-'), ('hybridheur', 'HybridHeur-'),
                          ('be-nn', 'BE-NN-')):
         if token.startswith(kind + ':'):
@@ -257,7 +286,7 @@ def _make_factory(token):
                     raise ValueError(f'{kind} token needs 4 parts: {token}')
                 _, label, path, extra_path = parts
                 return AgentFactory(kind, label=label, path=f'{path}:{extra_path}'), f'{prefix}{label}'
-            if kind == 'beend' or kind == 'bewait':
+            if kind in ('beend', 'bewait', 'besilent'):
                 parts = token.split(':', 2)
                 label = parts[1]
                 path = parts[2] if len(parts) > 2 else ''

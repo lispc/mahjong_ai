@@ -141,3 +141,13 @@ output/nn_wait_dist_10k_tenpai_conv.pt
 output/exact_endgame_labels_6000.npz
 output/nn_defensive_6000.pt
 ```
+
+---
+
+## 更新（2026-07-16）：§1 duplicate 结论为 harness bug 产物
+
+本报告 §1 的 paired 差（Hybrid-Best −15.4% vs Baseline、−12.7% vs BeliefExp）由
+`benchmark_duplicate.py` 旧版同名前缀匹配 bug 造成。修正后符号反转：**Hybrid-Best +7.0%
+[+3.9,+10.1] vs Baseline、+7.1% [+4.1,+10.1] vs BeliefExp**（1000 arena pairs）。
+Baseline vs BeliefExp +0.1% [−2.3,+2.5]（结论不变：不显著）。§2–§5（Cython、exact
+endgame、wait_dist）不受影响。完整重算见 `docs/reports/duplicate-reanalysis-0716.md`。
