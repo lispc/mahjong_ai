@@ -129,6 +129,19 @@ class AgentFactory:
             return HybridNNBeliefAgent(f'Hybrid-{self.label}', nn_model_path=model_path,
                                        belief_kind=belief_kind, device='cpu',
                                        temperature=0.0)
+        if self.kind == 'hybridt':
+            # path 格式：model_path:belief_kind:tenpai_threshold
+            from algo.agents.hybrid_nn_belief_agent import HybridNNBeliefAgent
+            model_path, belief_kind, thr = self.path.rsplit(':', 2)
+            return HybridNNBeliefAgent(f'HybridT-{self.label}', nn_model_path=model_path,
+                                       belief_kind=belief_kind, device='cpu',
+                                       temperature=0.0, tenpai_threshold=int(thr))
+        if self.kind == 'hybridfix':
+            from algo.agents.hybrid_nn_belief_tenpaifix_agent import \
+                HybridNNBeliefTenpaiFixAgent
+            return HybridNNBeliefTenpaiFixAgent(
+                f'HybridFix-{self.label}', nn_model_path=self.path,
+                belief_kind='beliefexp', device='cpu', temperature=0.0)
         if self.kind == 'hybridopp':
             from algo.agents.hybrid_nn_belief_opp_agent import HybridNNBeliefOppAgent
             # path 格式：model_path:opp_model_path（opp 默认 output/opponent_model.pt）
@@ -274,6 +287,7 @@ def _make_factory(token):
                          ('beend', 'BEEnd-'), ('bewait', 'BEWait-'),
                          ('besilent', 'BESilent-'),
                          ('danger', 'Danger-'), ('hybrid', 'Hybrid-'),
+                         ('hybridt', 'HybridT-'), ('hybridfix', 'HybridFix-'),
                          ('hybridopp', 'HybridOpp-'), ('hybridwait', 'HybridWait-'),
                          ('hybridfilter', 'HybridFilter-'), ('hybridend', 'HybridEnd-'),
                          ('hybridsilent', 'HybridSil-'),
@@ -286,6 +300,14 @@ def _make_factory(token):
                     raise ValueError(f'{kind} token needs 4 parts: {token}')
                 _, label, path, extra_path = parts
                 return AgentFactory(kind, label=label, path=f'{path}:{extra_path}'), f'{prefix}{label}'
+            if kind == 'hybridt':
+                # hybridt:LABEL:MODEL_PATH:THRESHOLD（MODEL_PATH 不含冒号）
+                parts = token.split(':')
+                if len(parts) != 4:
+                    raise ValueError(f'hybridt token needs 4 parts: {token}')
+                _, label, path, thr = parts
+                return AgentFactory(kind, label=label,
+                                    path=f'{path}:beliefexp:{thr}'), f'{prefix}{label}'
             if kind in ('beend', 'bewait', 'besilent'):
                 parts = token.split(':', 2)
                 label = parts[1]

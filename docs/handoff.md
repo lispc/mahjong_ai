@@ -74,7 +74,21 @@ PYTHONPATH=. python3 scripts/rl/benchmark_duplicate.py \
 
 ---
 
-## 4. 项目状态（2026-07-16）——**已重启，方向 0 完成**
+## 4. 项目状态（2026-07-17）——**RL/自对弈 bootstrap 冲刺完成，判死**
+
+### 方向 E（RL/NN/bootstrap 冲刺）：15 候选零晋升，证据定级判死
+
+- 一晚上按 eval-protocol 筛查 **15 个候选**（1000-pair duplicate arena 各一次），
+  无一达到 +1.0% 预登记线：弃牌 AWBC×3、响应头 AWR×2、tenpai 阈值×5、
+  成对 rollout 标签×4、tenpai 死代码修复×1。两个「少碰」候选显著为负。
+- **新增铁证**：12,000 状态 god-mode 成对 rollout（同牌山洗牌，Hybrid 续打）
+  测得碰的配对因果效应 mean Δ=+0.117——响应头的高碰 take 率是对的；
+  此前 AWR 的「碰 advantage 为负」是选择偏差混杂。outcome 级 RL 与
+  配对因果标签 RL 均无法改进当前 best：信用分配 SNR + 特征不可分 + 在位者近最优。
+- 剩余未证伪方向只剩**特征扩容**（belief/danger 信号入特征重训全模型）；
+  F5 的配对 Δ 数据集（`output/peng_eval_v1.npz` + `peng_states_v1_merged.pkl`）
+  可直接复用为高质量标签源。
+- 详见 `docs/reports/selfplay-bootstrap-0717.md`（含全部候选登记与资产清单）。
 
 ### 方向 0：评测校准（完成，结论重大）
 

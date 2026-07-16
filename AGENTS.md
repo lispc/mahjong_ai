@@ -221,11 +221,15 @@ HybridNNBeliefAgent(
 - `scripts/rl/train_seq_opp_model.py`：默听/待牌序列模型训练（seq/no-seq 消融，all/silent 拆分指标）
 - `scripts/rl/oracle_endgame_gate.py`：完美待牌上界实验（方向 A/B 判死的关键证据）
 - `scripts/rl/benchmark_duplicate.py`：duplicate 配对 benchmark（席位识别 + score-proxy 配对差）
+- `scripts/rl/selfplay_bootstrap.py`：自对弈 bootstrap 管线（collect 含响应记录 / train_value / finetune / finetune_resp）
+- `scripts/rl/peng_paired_eval.py`：god-state 快照 + 成对 rollout 因果评估（collect/evaluate/train，passfix_anchor 模式）
 
 新增 agent（benchmark_pool token）：
 - `hybridend:` = HybridNNBeliefEndgameAgent（Hybrid 接 exact-solver 搜索层，已证无增量）
 - `besilent:` = BeliefSilentGuardAgent（BeliefExp + 序列模型默听防守）
 - `hybridsilent:` = HybridNNBesilentAgent（Hybrid 接静默守卫搜索层）
+- `hybridt:LABEL:PATH:THRESHOLD` = HybridNNBeliefAgent 可配置 tenpai_threshold
+- `hybridfix:LABEL:PATH` = HybridNNBeliefTenpaiFixAgent（修复 _is_critical 的 tenpai_players 死代码；评测证实几乎无差，不晋升）
 
 ### 5.2 数据文件
 
@@ -353,6 +357,9 @@ PYTHONPATH=. python3 scripts/rl/train_wait_dist.py \
 9. **不要提交 `.venv/`**：已加入 `.gitignore`。
 10. **`tests/legacy_test.py` 已知失败（2026-07 起）**：`test_select` 断言 `select()[:2] == [2, 22]`，实际返回 `[22, 2]`——Cython eval2 集成（commit `05a303e`）后同分候选的 tie-break 顺序变化所致，**与强度无关**（同分值），clean tree 上同样失败。如需消除，把断言改为集合比较；勿为此改动 legacy eval 语义（Baseline 依赖 `algo.select`）。
 11. **HybridNNBeliefAgent 无 `.context` 属性**：引擎 `getattr(agent, 'context', None)` 得 None，导致 Hybrid 在对战中**从不报听**（PPOAgent tenpai head 被跳过）。引擎无报听计分，当前评测目标下无碍；接入计分前需重新评估（见 `docs/eval-protocol.md` §1 备注）。
+12. **HybridNNBeliefAgent._is_critical 的 tenpai 分支是死代码（2026-07-17 确认几乎无害）**：误用 `getattr(ctx,'tenpai',set())`（ContextV3 实为 `tenpai_players`），「对手报听→搜索」从未触发，只有弃牌数阈值生效。修复变体 `hybridfix` 1000-pair 仅 +0.1%（报听几乎都发生在 ≥28 弃牌后），**不改原类**；若未来报听提前（如引擎接入报听收益）需重估。
+13. **Hybrid 的 melds 列表 quirk**：Hybrid 把同一 melds 列表共享给 nn_agent/belief_agent，`add_meld` 被三个组件各调一次 → 每个副露在列表中出现 3 次（`full_hand()` 巧合得到正确 3 张；gang 少 1 张）。写快照/状态注入代码时必须按此生产表示复刻（见 `scripts/rl/peng_paired_eval.py::_inject`）。
+14. **RL/自对弈 bootstrap 判死（2026-07-17，15 候选零晋升）**：outcome 级 RL（AWBC/AWR）与配对因果标签 RL 均无法改进当前 best；根因=信用分配 SNR + 选择偏差混杂 + 误差状态在 175 维特征上不可分 + 在位者近最优。剩余方向：belief/danger 信号入特征重训。详见 `docs/reports/selfplay-bootstrap-0717.md`。复用资产：`output/peng_eval_v1.npz`（12k 配对 Δ）、`output/bootstrap_v{1,2}_merged.npz`、`scripts/rl/selfplay_bootstrap.py`、`scripts/rl/peng_paired_eval.py`。
 
 ---
 
