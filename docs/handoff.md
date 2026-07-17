@@ -94,6 +94,10 @@ PYTHONPATH=. python3 scripts/rl/benchmark_duplicate.py \
 - **新 best：`output/jax_gumbel_iter92.pt`**（arena anchor 已切换，见
   `docs/eval-protocol.md` §2.1）。机制结论：密集搜索目标绕开了 outcome 信号的
   内在 SNR 天花板（方向 2 判词对该形态不成立）。
+- **二代（移动锚）收敛判死（07-18）**：in-env +1~2pp 看似正，5000-pair 独立种子
+  **−2.9% [−4.2,−1.7]** 显著倒退——自蒸馏回声室，与历史「二代递减」同构。
+  AZ 迭代在当前形态下一代收敛；in-env eval 对二代是误导信号，arena paired 才是
+  唯一可靠裁决。
 - 详见 `docs/reports/jax-rl-0717.md` 附录。
 
 ### 方向 0/2（god-mode 上界 + PTIE critic，2026-07-17 下午，双关闭）

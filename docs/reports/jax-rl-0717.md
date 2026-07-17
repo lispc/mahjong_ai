@@ -196,4 +196,16 @@ AlphaZero（Danihelka et al., ICLR 2022）保证极少模拟（≥2/候选）即
 3. 训练/arena 语义差（七对子、副露 quirk）存在但未阻断晋升——晋升在 Python
    arena 实测定论。
 
-{{NEXT_ROUND_RESULT}}
+### 二代（移动锚 AZ 迭代，2026-07-18，**收敛判死、一代保持 best**）
+
+- 配置：init=anchor=一代 iter92，同规模 12M decisions（3.8h）。
+- in-env：final-10 margin vs 一代 **1v3 +1.0pp / 3v1 +2.2pp**（看似小幅为正）。
+- arena（一次性裁决链）：1000-pair **+2.6% [−0.2,+5.4]** → 5000-pair 独立种子
+  **−2.9% [−4.2,−1.7]**（score-proxy −0.045 [−0.074,−0.016]）——**显著倒退**，
+  筛查命中第四次被 winner's curse 反转。
+- **结论：AZ 自我迭代在当前形态下一代收敛**。in-env eval（vs ref）对二代是
+  误导信号（+1~2pp 看似正），arena paired 才见真章（−2.9%）；与项目历史
+  「bootstrap 一代有效二代倒退」「soup v2 递减」同构——自蒸馏回声室：
+  目标=自己的搜索输出，微小系统偏差被放大（KL 仅 0.09 已足够）。
+- gen2 checkpoint 留存（`output/jax_gumbel_gen2/`），不用于部署。
+- pkl：`output/duplicate_jaxg2_vs_jaxg_{1000,5000}.pkl`。
