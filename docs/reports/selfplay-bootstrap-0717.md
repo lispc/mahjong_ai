@@ -189,12 +189,36 @@ pkl：`duplicate_bootstrap_{pengstrict,pengloose,pfa,pfa2}_vs_best_1000.pkl`。
 BeliefExp 报听几乎都发生在总弃牌 ≥28 之后（计数阈值已触发），死代码几乎无害。
 **不改原类**，记录备查。pkl：`duplicate_hybridfix_vs_best_1000.pkl`。
 
+### 2.11 方向 F 判官：belief 特征可分性探针（2026-07-17，结论 FAIL）
+
+探针（`scripts/rl/belief_feature_probe.py`）：12k 配对 Δ 状态、head-peng 子集
+（11,210 态，正例 Δ<−0.5 共 875 个，base rate 7.8%），按 game_id 切分
+（train 8,940 / test 2,270），比较 5 组特征预测「坏碰」的 AUC：
+
+| 特征组 | logistic | MLP-64 |
+|---|---|---|
+| base175 | 0.548 | 0.483 |
+| belief26（danger/shanten/ukeire/wait/opp_level…） | 0.638 | 0.583 |
+| base+belief | 0.633 | 0.567 |
+| head_margin（响应头自身 peng−pass logit） | 0.572 | — |
+| margin+belief | 0.630 | 0.580 |
+
+- base 特征近瞎（0.55）；belief 信号有边际信息（logistic +0.084）但远低于
+  可分门槛（预登记：提升 ≥0.05 **且** MLP ≥0.75）；MLP 全面低于 logistic
+  （7.5% base rate 下非线性即过拟合）——**信号厚度到顶，方向 F 关闭**。
+- 逻辑权重方向合理（wait_sum_full +、wall_len −、shanten_full −）——
+  特征是「对的」，只是坏碰的因果信号本身太薄。
+- 至此响应头修复路径三重独立失败（AWR / 双向标签 / 单边修复）+ 可分性天花板，
+  **最终关闭**。序列模型（seq-opp）tenpai 概率作为特征未测，但权重分析指向
+  手牌强度类而非对手听牌类信号，先验低（~10%），不追。
+
 ---
 
 ## 3. 总结论（2026-07-17 02:15）
 
 **本批共筛查 15 个候选/变体（v1×3、v2×2、阈值×5、F5×4、bugfix×1），
-无一达到 +1.0% 预登记晋级线；2 个显著为负（均为「少碰」方向）。零晋升。**
+无一达到 +1.0% 预登记晋级线；2 个显著为负（均为「少碰」方向）。零晋升。
+随后方向 F 探针（§2.11）亦 FAIL——特征扩容路径同步关闭。**
 
 对「RL / NN / 自对弈 bootstrap」的证据强度，今晚之后可以定级为**判死**：
 
@@ -207,11 +231,10 @@ BeliefExp 报听几乎都发生在总弃牌 ≥28 之后（计数阈值已触发
 3. **运行点/死代码层面无免费收益**（阈值×5、tenpai fix）。
 
 剩余未证伪但有代价的方向（优先级排序，均非「再试一次 RL」）：
-- **特征扩容**：把 BeliefExp 的 danger/belief 信号作为额外输入特征重训全模型
-  （消融建议 #2；F5 的 12k 配对 Δ 数据集可直接当高质量标签源复用，
-  尤其用于检验「新特征能否分开坏碰」这一可证伪命题）；
+- ~~**特征扩容**~~（2026-07-17 探针判死，§2.11）：belief/danger 信号入特征
+  对「坏碰可分性」仅 AUC 0.638（<0.75 门槛），关闭；
 - 引擎接入真实计分（报听/自摸加成）后重估一批与报听相关的结论；
-- 修复 legacy `test_select` 断言（集合比较，勿动 eval 语义）。
+- ~~修复 legacy `test_select` 断言~~（2026-07-17 已修：集合比较，全绿）。
 
 **资产**（可复用）：
 - `scripts/rl/selfplay_bootstrap.py`（collect/train_value/finetune/finetune_resp）；

@@ -31,7 +31,8 @@ def test_list_sub():
 
 def test_select():
     tiles = [6, 7, 8, 11, 11, 11, 12, 13, 18, 18, 22, 28, 2, 29]
-    assert_eq(select(tiles, with_prob=False)[:2], [wan2, tong2])
+    # Cython eval2 后同分候选 tie-break 顺序不稳定，按集合比较（见 AGENTS.md §7.10）
+    assert_eq(set(select(tiles, with_prob=False)[:2]), {wan2, tong2})
     tiles = [2, 5, 5, 6, 11, 11, 14, 24, 26, 28, 28, 29, 33, 36]
     assert_eq(select(tiles, with_prob=False)[:2], [blank, south])
     tiles = [1, 1, 1, 7, 8, 13, 16, 16, 18, 6, 7, 8, 31, 33]
