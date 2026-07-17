@@ -164,8 +164,8 @@ tail -f output/compute_mc_values_pypy_5000_part0.log
 from algo.agents.hybrid_nn_belief_agent import HybridNNBeliefAgent
 
 HybridNNBeliefAgent(
-    'Hybrid-FullAction-SoupDistilled',
-    nn_model_path='output/nn_full_action_best.pt',
+    'Hybrid-FullAction-Gumbel92',
+    nn_model_path='output/jax_gumbel_iter92.pt',
     belief_kind='beliefexp',
     tenpai_threshold=28,
     device='cpu',
@@ -173,12 +173,15 @@ HybridNNBeliefAgent(
 ```
 
 对应模型（PyTorch `.pt`）：
-- `output/nn_full_action_best.pt` + `output/nn_full_action_best_config.json`
+- `output/jax_gumbel_iter92.pt` + `output/jax_gumbel_iter92_config.json`
   - `TileConvNet`，128 channels / 6 residual blocks / 512 hidden
-  - 带 dealin head、value head、tenpai head 与 **response head**（碰/杠/胡声明）
-  - 来源：把 `nn_full_action_best.pt` 与 `nn_full_action_128000_epoch_07.pt` 做 model soup，再用该 soup 当教师蒸馏回单一模型
+  - 带 dealin head、value head、tenpai head 与 response head
+  - 来源：JAX 引擎自对弈 + Gumbel 搜索目标 AZ 闭环（方向 1b，2026-07-18 晋升，
+    11000 pairs 合并 +2.0% [+1.1,+2.9]，详见 `docs/reports/jax-rl-0717.md` 附录）
 
-最近 benchmark（400 局同一 pool）：
+旧 best（仍可用，`hybrid:Best:output/nn_full_action_best.pt`）：model soup + 蒸馏。
+
+晋升前最近 benchmark（400 局同一 pool，旧 best 时代）：
 
 | Agent | win | self | ron | deal-in | draw | Elo |
 |---|---|---|---|---|---|---|

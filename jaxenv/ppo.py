@@ -23,6 +23,15 @@
 示例（smoke）：
     CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. python3 jaxenv/ppo.py \
         --iters 5 --n-envs 32 --t-steps 64 --eval-every 5 --eval-games 64
+
+方向 1b（Gumbel-top-k 1-ply 搜索目标，见 jaxenv/search.py）：
+    CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. python3 jaxenv/ppo.py \
+        --target-mode gumbel --search-k 8 --search-draws 2 --search-beta 8.0 \
+        --iters 5 --n-envs 32 --t-steps 64 --eval-every 5 --eval-games 64
+    gumbel 模式：rollout 时对每个 DISCARD 决策 vmap 计算 π' 存入轨迹；DISCARD
+    样本的 PPO surrogate 替换为 CE(π')（CLAIM/TENPAI 仍用 surrogate），出牌动作
+    默认从 π' 采样（--no-play-searched 关闭）；日志/metrics.jsonl 增加 agree
+    字段（prior argmax == π' argmax 比例，kept DISCARD 决策上统计）。
 """
 
 import argparse
@@ -41,6 +50,7 @@ import optax
 from jaxenv import env as env_mod
 from jaxenv.model_flax import build_model_flax
 from jaxenv.obs import observe, actor_of, OBS_DIM
+from jaxenv.search import improved_policy
 
 NEG = -1e9
 N_ACTIONS = env_mod.N_ACTIONS
@@ -67,12 +77,17 @@ def build_logits(out, phase, mask):
 # rollout（scan 版本：一次 jit 调用跑 T 步）
 # ---------------------------------------------------------------------------
 
-def make_rollout_fn(model, t_steps):
-    """返回 jitted (params, states, rng) -> (states', rng', batch) 函数。"""
+def make_rollout_fn(model, t_steps, search_cfg=None, play_searched=False):
+    """返回 jitted (params, states, rng) -> (states', rng', batch) 函数。
+
+    search_cfg: None（outcome 模式）或 dict(k=, draws=, beta=)（gumbel 模式）。
+    gumbel 模式下 batch 额外含 (pi_prime(T,N,34), prior_arg(T,N), pi_arg(T,N))；
+    play_searched=True 时 DISCARD 决策改从 π' 采样（AZ 闭环）。
+    """
 
     def body(carry, _):
         params, states, rng = carry
-        rng, k_act, k_reset = jax.random.split(rng, 3)
+        rng, k_act, k_act2, k_reset, k_search = jax.random.split(rng, 5)
 
         obs = jax.vmap(observe)(states)                       # (N,175)
         out = model.apply({'params': params}, obs)
@@ -84,6 +99,24 @@ def make_rollout_fn(model, t_steps):
         # done 状态（天胡残留）mask 全 False：logits 置零保证采样有定义（no-op）
         safe = jnp.where(pre_done[:, None], jnp.zeros(N_ACTIONS, jnp.float32), logits)
         act = jax.random.categorical(k_act, safe, axis=-1).astype(jnp.int8)
+
+        extra = ()
+        if search_cfg is not None:
+            skeys = jax.random.split(k_search, states.done.shape[0])
+            pi_prime, _, _ = jax.vmap(lambda st, kk: improved_policy(
+                params, model, st, kk, search_cfg['k'], search_cfg['draws'],
+                search_cfg['beta']))(states, skeys)           # (N,34)
+            if play_searched:
+                log_pi = jnp.where(pi_prime > 0, jnp.log(pi_prime), NEG)
+                safe_pi = jnp.where(pre_done[:, None],
+                                    jnp.zeros(34, jnp.float32), log_pi)
+                act_s = jax.random.categorical(k_act2, safe_pi, axis=-1).astype(jnp.int8)
+                act = jnp.where(phase == jnp.int8(env_mod.PHASE_DISCARD), act_s, act)
+            prior_arg = jnp.argmax(jnp.where(masks[:, :34], out['policy'], NEG),
+                                   -1).astype(jnp.int8)
+            pi_arg = jnp.argmax(pi_prime, -1).astype(jnp.int8)
+            extra = (pi_prime, prior_arg, pi_arg)
+
         logp_all = jax.nn.log_softmax(safe, axis=-1)
         logp = jnp.take_along_axis(logp_all, act[:, None].astype(jnp.int32), -1)[:, 0]
         val = out['value'][:, 0]
@@ -98,7 +131,7 @@ def make_rollout_fn(model, t_steps):
             return jnp.where(done.reshape(-1, *([1] * (f.ndim - 1))), f, s)
         states2 = jax.tree.map(pick, fresh, new_states)
 
-        batch = (obs, act, logp, val, masks, phase, player, pre_done, rew, done)
+        batch = (obs, act, logp, val, masks, phase, player, pre_done, rew, done) + extra
         return (params, states2, rng), batch
 
     @jax.jit
@@ -156,7 +189,12 @@ def compute_gae(players, values, rewards, dones, pre_done, lam=0.95):
 # PPO 更新
 # ---------------------------------------------------------------------------
 
-def make_train_step(model, tx, clip, vf_coef, ent_coef, kl_coef):
+def make_train_step(model, tx, clip, vf_coef, ent_coef, kl_coef, target_mode='outcome'):
+    """target_mode='outcome'：全部样本 PPO clipped surrogate（原行为）。
+    target_mode='gumbel'：DISCARD 样本改为 CE(π')（batch['pi']，搜索改进目标），
+    CLAIM/TENPAI 样本保留 PPO surrogate（response/tenpai 头继续吃 outcome 信号）；
+    value MSE / KL 锚 / entropy 不变。
+    """
     @jax.jit
     def train_step(params, opt_state, ref_params, batch):
         def loss_fn(p):
@@ -166,8 +204,19 @@ def make_train_step(model, tx, clip, vf_coef, ent_coef, kl_coef):
             logp = jnp.take_along_axis(logp_all, batch['act'][:, None].astype(jnp.int32), -1)[:, 0]
             ratio = jnp.exp(logp - batch['logp_old'])
             adv = batch['adv']
-            pg = -jnp.minimum(ratio * adv,
-                              jnp.clip(ratio, 1.0 - clip, 1.0 + clip) * adv).mean()
+            pg_per = -jnp.minimum(ratio * adv,
+                                  jnp.clip(ratio, 1.0 - clip, 1.0 + clip) * adv)
+            aux = {}
+            if target_mode == 'gumbel':
+                is_disc = (batch['phase'] == jnp.int8(env_mod.PHASE_DISCARD)).astype(jnp.float32)
+                ce_per = -(batch['pi'] * logp_all[:, :34]).sum(-1)
+                ce = (ce_per * is_disc).sum() / jnp.maximum(is_disc.sum(), 1.0)
+                nond = 1.0 - is_disc
+                pg = (pg_per * nond).sum() / jnp.maximum(nond.sum(), 1.0)
+                aux['ce'] = ce
+                pg = pg + ce
+            else:
+                pg = pg_per.mean()
             v = ((out['value'][:, 0] - batch['ret']) ** 2).mean()
             prob = jax.nn.softmax(logits, -1)
             ent = -(prob * logp_all).sum(-1).mean()
@@ -177,7 +226,7 @@ def make_train_step(model, tx, clip, vf_coef, ent_coef, kl_coef):
             prob_ref = jax.nn.softmax(logits_ref, -1)
             kl = (prob_ref * (logp_ref - logp_all)).sum(-1).mean()
             total = pg + vf_coef * v - ent_coef * ent + kl_coef * kl
-            return total, {'pg': pg, 'v': v, 'ent': ent, 'kl': kl}
+            return total, {'pg': pg, 'v': v, 'ent': ent, 'kl': kl, **aux}
 
         (loss, aux), grads = jax.value_and_grad(loss_fn, has_aux=True)(params)
         updates, opt_state = tx.update(grads, opt_state, params)
@@ -268,6 +317,13 @@ def main():
     ap.add_argument('--eval-every', type=int, default=25)
     ap.add_argument('--eval-games', type=int, default=128)
     ap.add_argument('--save-every', type=int, default=25)
+    # 方向 1b：Gumbel-top-k 1-ply 搜索目标
+    ap.add_argument('--target-mode', choices=['outcome', 'gumbel'], default='outcome')
+    ap.add_argument('--search-k', type=int, default=8)
+    ap.add_argument('--search-draws', type=int, default=2)
+    ap.add_argument('--search-beta', type=float, default=8.0)
+    ap.add_argument('--no-play-searched', action='store_true',
+                    help='gumbel 模式下仍用 prior 采样出牌（消融用；默认从 π\' 采样）')
     args = ap.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -285,9 +341,16 @@ def main():
                      optax.adam(args.lr))
     opt_state = tx.init(params)
 
-    rollout = make_rollout_fn(model, args.t_steps)
+    search_cfg = None
+    play_searched = False
+    if args.target_mode == 'gumbel':
+        search_cfg = {'k': args.search_k, 'draws': args.search_draws,
+                      'beta': args.search_beta}
+        play_searched = not args.no_play_searched
+
+    rollout = make_rollout_fn(model, args.t_steps, search_cfg, play_searched)
     train_step = make_train_step(model, tx, args.clip, args.vf_coef,
-                                 args.ent_coef, args.kl_coef)
+                                 args.ent_coef, args.kl_coef, args.target_mode)
     eval_step = make_eval_step(model)
 
     rng = jax.random.PRNGKey(args.seed)
@@ -297,19 +360,33 @@ def main():
     metrics_path = os.path.join(args.out_dir, 'metrics.jsonl')
     mlog = open(metrics_path, 'a', buffering=1)
     print(f'[ppo] init={args.init} n_envs={args.n_envs} T={args.t_steps} '
-          f'iters={args.iters} -> {args.out_dir}', flush=True)
+          f'iters={args.iters} target={args.target_mode}'
+          + (f' (k={args.search_k} draws={args.search_draws} '
+             f'beta={args.search_beta} play_searched={play_searched})'
+             if search_cfg else '')
+          + f' -> {args.out_dir}', flush=True)
 
     total_decisions = 0
     total_time = 0.0
     for it in range(1, args.iters + 1):
         t0 = time.time()
         states, rng, batch = rollout(params, states, rng)
-        (obs_b, act_b, logp_b, val_b, mask_b, phase_b,
-         player_b, predone_b, rew_b, done_b) = [np.asarray(x) for x in batch]
+        if search_cfg is not None:
+            (obs_b, act_b, logp_b, val_b, mask_b, phase_b, player_b, predone_b,
+             rew_b, done_b, pi_b, parg_b, piarg_b) = [np.asarray(x) for x in batch]
+        else:
+            (obs_b, act_b, logp_b, val_b, mask_b, phase_b,
+             player_b, predone_b, rew_b, done_b) = [np.asarray(x) for x in batch]
         total_decisions += args.n_envs * args.t_steps
 
         adv, ret, keep = compute_gae(player_b, val_b, rew_b, done_b, predone_b,
                                      lam=args.gae_lambda)
+        # G1 门指标：prior argmax == π' argmax 的比例（kept DISCARD 决策）
+        agree = None
+        if search_cfg is not None:
+            m_ag = keep & (phase_b == env_mod.PHASE_DISCARD) & ~predone_b
+            if m_ag.any():
+                agree = float((parg_b == piarg_b)[m_ag].mean())
         idx = np.where(keep.ravel())[0]
         if len(idx) == 0:
             print(f'[ppo] iter {it}: no kept samples, skip update', flush=True)
@@ -324,6 +401,8 @@ def main():
             'adv': flat(adv).astype(np.float32),
             'ret': jnp.asarray(flat(ret)),
         }
+        if search_cfg is not None:
+            data['pi'] = jnp.asarray(flat(pi_b))
         data['adv'] = (data['adv'] - data['adv'].mean()) / (data['adv'].std() + 1e-8)
         data['adv'] = jnp.asarray(data['adv'])
         M = len(idx)
@@ -343,11 +422,16 @@ def main():
         total_time += dt
         dps = args.n_envs * args.t_steps / dt
         msg = {k: float(np.mean(v)) for k, v in agg.items()}
-        print(f'[ppo] iter {it}/{args.iters} kept={M}/{keep.size} '
-              + ' '.join(f'{k}={v:+.4f}' for k, v in sorted(msg.items()))
-              + f' time={dt:.1f}s ({dps:.0f} dec/s)', flush=True)
-        mlog.write(json.dumps({'type': 'train', 'iter': it, 'kept': int(M),
-                               **msg, 'time': dt}) + '\n')
+        line = (f'[ppo] iter {it}/{args.iters} kept={M}/{keep.size} '
+                + ' '.join(f'{k}={v:+.4f}' for k, v in sorted(msg.items())))
+        if agree is not None:
+            line += f' agree={agree:.4f}'
+        line += f' time={dt:.1f}s ({dps:.0f} dec/s)'
+        print(line, flush=True)
+        rec = {'type': 'train', 'iter': it, 'kept': int(M), **msg, 'time': dt}
+        if agree is not None:
+            rec['agree'] = agree
+        mlog.write(json.dumps(rec) + '\n')
 
         if it % args.eval_every == 0:
             k_eval, k1, k3 = jax.random.split(k_eval, 3)

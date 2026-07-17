@@ -7,23 +7,29 @@
 ## 1. 当前最强配置
 
 ```python
-# benchmark token: hybrid:newbest:output/nn_full_action_best.pt:beliefexp
+# benchmark token: hybrid:JAXG:output/jax_gumbel_iter92.pt
 # 对应类：algo.agents.hybrid_nn_belief_agent.HybridNNBeliefAgent
 from algo.agents.hybrid_nn_belief_agent import HybridNNBeliefAgent
 
 HybridNNBeliefAgent(
-    'Hybrid-FullAction-SoupDistilled',
-    nn_model_path='output/nn_full_action_best.pt',
+    'Hybrid-FullAction-Gumbel92',
+    nn_model_path='output/jax_gumbel_iter92.pt',
     belief_kind='beliefexp',
     tenpai_threshold=28,
     device='cpu',
 )
 ```
 
-对应模型：`output/nn_full_action_best.pt` + `output/nn_full_action_best_config.json`
+对应模型：`output/jax_gumbel_iter92.pt` + `output/jax_gumbel_iter92_config.json`
 - `TileConvNet`，128 channels / 6 residual blocks / 512 hidden
 - 带 dealin / value / tenpai / response head
-- 来源：model soup + 蒸馏，详见 `docs/reports/project_history.md` §6.11–§6.12
+- 来源：**JAX 引擎自对弈 + Gumbel-top-k 1-ply 搜索目标 AZ 闭环（12M decisions）**，
+  从 `nn_full_action_best.pt` 出发经 KL 锚 PPO 训练（`jaxenv/ppo.py --target-mode gumbel`）
+- 晋升证据（11000 pairs 合并）：**vs 旧 best +2.0% [+1.1,+2.9]**（score-proxy
+  +0.054 [+0.023,+0.084] @5000），协议全流程通过（`docs/reports/jax-rl-0717.md` 附录）
+
+旧 best（2026-07-17 前）：`output/nn_full_action_best.pt`（model soup + 蒸馏，
+`docs/reports/project_history.md` §6.11–§6.12）。
 
 400 局同一 pool 参考结果：
 
@@ -74,7 +80,21 @@ PYTHONPATH=. python3 scripts/rl/benchmark_duplicate.py \
 
 ---
 
-## 4. 项目状态（2026-07-17）——**RL/自对弈 bootstrap 冲刺完成，判死**
+## 4. 项目状态（2026-07-18 凌晨）——**方向 1b 晋升：Gumbel AZ 闭环产出新 best**
+
+### 方向 1b（Gumbel 搜索目标 AZ 闭环）：**晋升**（项目史上首个 RL 来源晋升）
+
+- `jaxenv/` 全管线（JAX 引擎 547k steps/s + Flax 移植 + obs 对齐 + PPO+KL 锚 +
+  Gumbel-top-k 1-ply 搜索目标）。β=32 校准（子任务默认 β=8 翻不动 prior）。
+- pilot 12M searched decisions / 3.7h：训练健康（agree 0.58→0.65、KL ~0.45、
+  流局 <1%）；in-env margin +5.3pp（outcome pilot 同口径 +3.0pp）。
+- **晋升链**：1000-pair +1.6% → 5000-pair +2.8% [+1.5,+4.2]（4×SE）→ 独立复跑
+  +1.2%（符号一致）；**合并 11000 pairs +2.0% [+1.1,+2.9]**，score-proxy
+  +0.054 [+0.023,+0.084]。guardrail 点炮 +2.3pp（<+3pp 线）。
+- **新 best：`output/jax_gumbel_iter92.pt`**（arena anchor 已切换，见
+  `docs/eval-protocol.md` §2.1）。机制结论：密集搜索目标绕开了 outcome 信号的
+  内在 SNR 天花板（方向 2 判词对该形态不成立）。
+- 详见 `docs/reports/jax-rl-0717.md` 附录。
 
 ### 方向 0/2（god-mode 上界 + PTIE critic，2026-07-17 下午，双关闭）
 

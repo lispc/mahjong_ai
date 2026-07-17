@@ -75,3 +75,17 @@ def observe(state):
 
     return jnp.concatenate([hand_ch, rem, opp, flags,
                             progress[None]]).astype(jnp.float32)
+
+
+def obs_for_player(state, p, pending):
+    """指定玩家 p 视角、pending tile=pending 的 CLAIM 语义观测（搜索响应头用）。
+
+    等价于把 state 置为 phase=CLAIM、pending_tile=pending、claim_offset=(p-turn)%4
+    后调用 observe（offered tile 按 CLAIM 语义并入 p 的手牌通道与剩余通道）。
+    搜索中 p 恒为某对手（offset 1..3）；p==turn 时 offset=0，仅为定义完备。
+    """
+    off = ((p.astype(jnp.int32) - state.turn.astype(jnp.int32)) % 4).astype(jnp.int8)
+    st = state.replace(phase=jnp.int8(PHASE_CLAIM),
+                       pending_tile=jnp.asarray(pending, jnp.int8),
+                       claim_offset=off)
+    return observe(st)

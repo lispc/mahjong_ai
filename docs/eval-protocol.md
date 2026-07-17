@@ -40,7 +40,7 @@
 ```
 对手三件套（固定）：baseline, beliefexp, hybrid:Base:<anchor_model>
 候选席位：position 0 镜像（默认 2 局/seed）
-anchor_model：做决策时的当前 best（当前为 output/nn_full_action_best.pt）
+anchor_model：做决策时的当前 best（当前为 output/jax_gumbel_iter92.pt）
 ```
 
 命令：
