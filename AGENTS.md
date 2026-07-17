@@ -203,6 +203,7 @@ HybridNNBeliefAgent(
 
 | 文件 | 职责 |
 |---|---|
+| `jaxenv/` | **JAX 高速对局环境 + PPO 管线（2026-07-17，方向 1）**：`env.py`（Pgx 风格晋北环境，547k steps/s@batch4096 单 3090）、`rules.py`+`tables.npz`（查找表胡牌/向听；**tables.npz 被 gitignore，clone 后先跑 `PYTHONPATH=. python3 jaxenv/gen_tables.py` 生成，~1.2s**）、`model_flax.py`（TileConvNet linen 移植）、`obs.py`（175 维观测，与部署 PPOAgent 对齐 <1e-6）、`ppo.py`（PPO+KL 锚训练）、`convert_torch.py`/`convert_back.py`（权重双向转换）、`test_*.py`（验证套件）。详见 `docs/reports/jax-rl-0717.md` |
 | `algo/nn/model.py` | Policy-Value Net（PyTorch）；`TileConvNet` 现支持 `se_ratio`、`attn_heads`、`attn_layers`、`wait_dist_head` |
 | `algo/nn/value_model.py` | Deep Value Net（PyTorch） |
 | `algo/nn/nn_leaf.py` | ExpectiMax 叶子估值接口；可用 `MJ_NN_VALUE_MODEL` 指定 policy-value 网络当 value leaf |
@@ -223,6 +224,8 @@ HybridNNBeliefAgent(
 - `scripts/rl/benchmark_duplicate.py`：duplicate 配对 benchmark（席位识别 + score-proxy 配对差）
 - `scripts/rl/selfplay_bootstrap.py`：自对弈 bootstrap 管线（collect 含响应记录 / train_value / finetune / finetune_resp）
 - `scripts/rl/peng_paired_eval.py`：god-state 快照 + 成对 rollout 因果评估（collect/evaluate/train，passfix_anchor 模式）
+- `scripts/rl/god_mode_upper_bound.py`：god-mode 完美信息上界测量（2026-07-17，方向 0）
+- `scripts/rl/ptie_critic.py`：PTIE 完美信息 critic 管线（collect 含 god 特征 / train_critic / finetune，方向 2）
 
 新增 agent（benchmark_pool token）：
 - `hybridend:` = HybridNNBeliefEndgameAgent（Hybrid 接 exact-solver 搜索层，已证无增量）

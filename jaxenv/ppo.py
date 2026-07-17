@@ -1,0 +1,389 @@
+# -*- coding: utf-8 -*-
+"""PPO + KL 锚训练（Mahjax 配方），作用于 jaxenv 晋北麻将环境。
+
+- 单 GPU（CUDA_VISIBLE_DEVICES 外部指定），N_ENVS 场游戏 vmap 并行，T 个 env 步/iter。
+- 4 座位共享 policy（--init 加载 best msgpack）；冻结 ref 副本做 KL 锚。
+- 动作头映射：DISCARD→policy(34) 作 actions 0-33 logits；CLAIM→response(4) 映射到
+  34-37（pass/peng/gang/hu）；TENPAI→tenpai logit ± 映射到 38/39。其余动作 mask -1e9。
+  logp/entropy/KL 均按对应 head 的 masked softmax 计算。
+- 每步记录：obs（行动玩家）、action、logp、value、mask、phase、player、done；
+  done 的游戏同一步内先记终局、再 init 新局替换。
+- GAE：γ=1，λ=0.95。每个玩家的决策子序列单独算：终局 reward[player] 挂在该玩家
+  本局最后一次决策上，中间步 reward=0；delta = r + V(s_next_own) - V(s)
+  （s_next_own = 该玩家下一次决策的 value；终局后 bootstrap=0）。
+  每 iter 末尾未完成的游戏整段丢弃（跨局重置截断），不进 loss。
+- PPO：clip 0.2，K epochs，Adam lr 3e-4，grad clip 0.5，vf 0.5，ent 0.01，
+  KL 锚 coef 0.2（policy/response/tenpai 各 head 的 masked KL(ref‖cur)，按样本
+  激活 head 计入）。
+- 每 --eval-every iters：当前 argmax vs ref argmax，1v3 与 3v1 各 --eval-games 局
+  （vmapped），打印胜率差/流局率/点炮率，写 <out-dir>/metrics.jsonl。
+- 每 --save-every iters：存 params 到 <out-dir>/iter{N}.msgpack。
+- matmul 精度：默认（TF32），M4 已验证小模型吞吐不受影响。
+
+示例（smoke）：
+    CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. python3 jaxenv/ppo.py \
+        --iters 5 --n-envs 32 --t-steps 64 --eval-every 5 --eval-games 64
+"""
+
+import argparse
+import json
+import os
+import time
+from functools import partial
+
+import numpy as np
+
+import jax
+import jax.numpy as jnp
+from flax import serialization
+import optax
+
+from jaxenv import env as env_mod
+from jaxenv.model_flax import build_model_flax
+from jaxenv.obs import observe, actor_of, OBS_DIM
+
+NEG = -1e9
+N_ACTIONS = env_mod.N_ACTIONS
+
+
+# ---------------------------------------------------------------------------
+# 动作头映射
+# ---------------------------------------------------------------------------
+
+def build_logits(out, phase, mask):
+    """heads 输出 + phase(B,) + 合法 mask(B,40) -> (B,40) masked logits。"""
+    B = out['policy'].shape[0]
+    base = jnp.full((B, N_ACTIONS), NEG, jnp.float32)
+    pol = base.at[:, :34].set(out['policy'])
+    clm = base.at[:, 34:38].set(out['response'])
+    t = out['tenpai'][:, 0]
+    ten = base.at[:, 38].set(t).at[:, 39].set(-t)
+    logits = jnp.where((phase == jnp.int8(env_mod.PHASE_DISCARD))[:, None], pol,
+             jnp.where((phase == jnp.int8(env_mod.PHASE_CLAIM))[:, None], clm, ten))
+    return jnp.where(mask, logits, NEG)
+
+
+# ---------------------------------------------------------------------------
+# rollout（scan 版本：一次 jit 调用跑 T 步）
+# ---------------------------------------------------------------------------
+
+def make_rollout_fn(model, t_steps):
+    """返回 jitted (params, states, rng) -> (states', rng', batch) 函数。"""
+
+    def body(carry, _):
+        params, states, rng = carry
+        rng, k_act, k_reset = jax.random.split(rng, 3)
+
+        obs = jax.vmap(observe)(states)                       # (N,175)
+        out = model.apply({'params': params}, obs)
+        masks = jax.vmap(env_mod.legal_mask)(states)          # (N,40)
+        phase = states.phase
+        player = jax.vmap(actor_of)(states)                   # (N,)
+        pre_done = states.done
+        logits = build_logits(out, phase.astype(jnp.int32), masks)
+        # done 状态（天胡残留）mask 全 False：logits 置零保证采样有定义（no-op）
+        safe = jnp.where(pre_done[:, None], jnp.zeros(N_ACTIONS, jnp.float32), logits)
+        act = jax.random.categorical(k_act, safe, axis=-1).astype(jnp.int8)
+        logp_all = jax.nn.log_softmax(safe, axis=-1)
+        logp = jnp.take_along_axis(logp_all, act[:, None].astype(jnp.int32), -1)[:, 0]
+        val = out['value'][:, 0]
+
+        new_states, rew, done = jax.vmap(env_mod.step)(states, act)
+
+        # 同一步内自动重置：先记终局（上方 batch 输出），再用新局替换
+        keys = jax.random.split(k_reset, states.done.shape[0])
+        fresh = jax.vmap(env_mod.init)(keys)
+
+        def pick(f, s):
+            return jnp.where(done.reshape(-1, *([1] * (f.ndim - 1))), f, s)
+        states2 = jax.tree.map(pick, fresh, new_states)
+
+        batch = (obs, act, logp, val, masks, phase, player, pre_done, rew, done)
+        return (params, states2, rng), batch
+
+    @jax.jit
+    def rollout(params, states, rng):
+        (params, states, rng), batch = jax.lax.scan(
+            body, (params, states, rng), None, length=t_steps)
+        return states, rng, batch
+
+    return rollout
+
+
+# ---------------------------------------------------------------------------
+# GAE（host 侧，按玩家子序列）
+# ---------------------------------------------------------------------------
+
+def compute_gae(players, values, rewards, dones, pre_done, lam=0.95):
+    """players/values/dones/pre_done: (T,N) host 数组；rewards: (T,N,4)。
+
+    γ=1。返回 adv/ret/keep (T,N)。每 env 最后一段未完成游戏整段 keep=False。
+    pre_done（天胡 no-op 步）的决策不进任何子序列。
+    """
+    T, N = players.shape
+    adv = np.zeros((T, N), np.float32)
+    ret = np.zeros((T, N), np.float32)
+    keep = np.zeros((T, N), bool)
+    for e in range(N):
+        t0 = 0
+        for t1 in range(T):
+            if not dones[t1, e]:
+                continue
+            final_rew = rewards[t1, e]                       # (4,)
+            for p in range(4):
+                idxs = [t for t in range(t0, t1 + 1)
+                        if players[t, e] == p and not pre_done[t, e]]
+                if not idxs:
+                    continue
+                A = 0.0
+                for i in range(len(idxs) - 1, -1, -1):
+                    t = idxs[i]
+                    if i == len(idxs) - 1:
+                        delta = float(final_rew[p]) - values[t, e]   # bootstrap 0
+                        A = delta
+                    else:
+                        delta = values[idxs[i + 1], e] - values[t, e]  # r=0, γ=1
+                        A = delta + lam * A
+                    adv[t, e] = A
+                    ret[t, e] = A + values[t, e]
+                    keep[t, e] = True
+            t0 = t1 + 1
+        # [t0..T-1] 未完成尾段：keep 保持 False（丢弃）
+    return adv, ret, keep
+
+
+# ---------------------------------------------------------------------------
+# PPO 更新
+# ---------------------------------------------------------------------------
+
+def make_train_step(model, tx, clip, vf_coef, ent_coef, kl_coef):
+    @jax.jit
+    def train_step(params, opt_state, ref_params, batch):
+        def loss_fn(p):
+            out = model.apply({'params': p}, batch['obs'])
+            logits = build_logits(out, batch['phase'], batch['mask'])
+            logp_all = jax.nn.log_softmax(logits, -1)
+            logp = jnp.take_along_axis(logp_all, batch['act'][:, None].astype(jnp.int32), -1)[:, 0]
+            ratio = jnp.exp(logp - batch['logp_old'])
+            adv = batch['adv']
+            pg = -jnp.minimum(ratio * adv,
+                              jnp.clip(ratio, 1.0 - clip, 1.0 + clip) * adv).mean()
+            v = ((out['value'][:, 0] - batch['ret']) ** 2).mean()
+            prob = jax.nn.softmax(logits, -1)
+            ent = -(prob * logp_all).sum(-1).mean()
+            out_ref = model.apply({'params': ref_params}, batch['obs'])
+            logits_ref = build_logits(out_ref, batch['phase'], batch['mask'])
+            logp_ref = jax.nn.log_softmax(logits_ref, -1)
+            prob_ref = jax.nn.softmax(logits_ref, -1)
+            kl = (prob_ref * (logp_ref - logp_all)).sum(-1).mean()
+            total = pg + vf_coef * v - ent_coef * ent + kl_coef * kl
+            return total, {'pg': pg, 'v': v, 'ent': ent, 'kl': kl}
+
+        (loss, aux), grads = jax.value_and_grad(loss_fn, has_aux=True)(params)
+        updates, opt_state = tx.update(grads, opt_state, params)
+        params = optax.apply_updates(params, updates)
+        return params, opt_state, loss, aux
+
+    return train_step
+
+
+# ---------------------------------------------------------------------------
+# eval：当前 argmax vs ref argmax（1v3 / 3v1，vmapped）
+# ---------------------------------------------------------------------------
+
+def make_eval_step(model):
+    @jax.jit
+    def eval_step(cur_params, ref_params, states, cur_seat):
+        obs = jax.vmap(observe)(states)
+        masks = jax.vmap(env_mod.legal_mask)(states)
+        phase = states.phase.astype(jnp.int32)
+        out_c = model.apply({'params': cur_params}, obs)
+        out_r = model.apply({'params': ref_params}, obs)
+        lc = build_logits(out_c, phase, masks)
+        lr = build_logits(out_r, phase, masks)
+        actor = jax.vmap(actor_of)(states)
+        use_cur = cur_seat[actor]                             # (N,) bool
+        logits = jnp.where(use_cur[:, None], lc, lr)
+        safe = jnp.where(states.done[:, None], jnp.zeros(N_ACTIONS, jnp.float32), logits)
+        act = jnp.argmax(safe, -1).astype(jnp.int8)
+        return jax.vmap(env_mod.step)(states, act)[0]
+
+    return eval_step
+
+
+def play_eval(eval_step, cur_params, ref_params, n_games, cur_seat, rng,
+              max_steps=600):
+    """打 n_games 局（vmapped，argmax），返回指标 dict。cur_seat: (4,) bool。"""
+    keys = jax.random.split(rng, n_games)
+    states = jax.vmap(env_mod.init)(keys)
+    seat = jnp.asarray(cur_seat, dtype=bool)
+    for _ in range(max_steps):
+        if bool(jnp.all(states.done)):
+            break
+        states = eval_step(cur_params, ref_params, states, seat)
+    winner = np.asarray(states.winner)
+    win_type = np.asarray(states.win_type)
+    dealer = np.asarray(states.dealer)
+    done = np.asarray(states.done)
+    seat_np = np.asarray(cur_seat)
+    cur_win = float(np.mean((winner >= 0) & seat_np[np.clip(winner, 0, 3)] & done))
+    ref_win = float(np.mean((winner >= 0) & ~seat_np[np.clip(winner, 0, 3)] & done))
+    draw = float(np.mean((winner < 0) | ~done))
+    ron = (win_type == env_mod.WIN_RON) & done
+    cur_deal = float(np.mean(ron & seat_np[np.clip(dealer, 0, 3)]))
+    ref_deal = float(np.mean(ron & ~seat_np[np.clip(dealer, 0, 3)]))
+    return {'cur_win': cur_win, 'ref_win': ref_win,
+            'win_diff': cur_win - ref_win, 'draw': draw,
+            'cur_dealin': cur_deal, 'ref_dealin': ref_deal}
+
+
+# ---------------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------------
+
+def load_params(path):
+    with open(path, 'rb') as f:
+        variables = serialization.from_bytes(None, f.read())
+    return variables['params']
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--iters', type=int, default=200)
+    ap.add_argument('--n-envs', type=int, default=512)
+    ap.add_argument('--t-steps', type=int, default=256)
+    ap.add_argument('--lr', type=float, default=3e-4)
+    ap.add_argument('--kl-coef', type=float, default=0.2)
+    ap.add_argument('--ent-coef', type=float, default=0.01)
+    ap.add_argument('--vf-coef', type=float, default=0.5)
+    ap.add_argument('--clip', type=float, default=0.2)
+    ap.add_argument('--gae-lambda', type=float, default=0.95)
+    ap.add_argument('--epochs', type=int, default=4)
+    ap.add_argument('--minibatch-size', type=int, default=8192)
+    ap.add_argument('--max-grad-norm', type=float, default=0.5)
+    ap.add_argument('--seed', type=int, default=0)
+    ap.add_argument('--init', default='output/nn_full_action_best_flax.msgpack')
+    ap.add_argument('--config', default='output/nn_full_action_best_config.json')
+    ap.add_argument('--out-dir', default='output/jax_ppo')
+    ap.add_argument('--eval-every', type=int, default=25)
+    ap.add_argument('--eval-games', type=int, default=128)
+    ap.add_argument('--save-every', type=int, default=25)
+    args = ap.parse_args()
+
+    os.makedirs(args.out_dir, exist_ok=True)
+    with open(args.config) as f:
+        config = json.load(f)
+    # config 副本随产物落盘（convert_back 需要）
+    with open(os.path.join(args.out_dir, 'config.json'), 'w') as f:
+        json.dump(config, f, indent=2)
+
+    model = build_model_flax(config)
+    params = load_params(args.init)
+    ref_params = params                      # 冻结 KL 锚（params 为不可变 pytree）
+
+    tx = optax.chain(optax.clip_by_global_norm(args.max_grad_norm),
+                     optax.adam(args.lr))
+    opt_state = tx.init(params)
+
+    rollout = make_rollout_fn(model, args.t_steps)
+    train_step = make_train_step(model, tx, args.clip, args.vf_coef,
+                                 args.ent_coef, args.kl_coef)
+    eval_step = make_eval_step(model)
+
+    rng = jax.random.PRNGKey(args.seed)
+    rng, k_init, k_eval = jax.random.split(rng, 3)
+    states = jax.vmap(env_mod.init)(jax.random.split(k_init, args.n_envs))
+
+    metrics_path = os.path.join(args.out_dir, 'metrics.jsonl')
+    mlog = open(metrics_path, 'a', buffering=1)
+    print(f'[ppo] init={args.init} n_envs={args.n_envs} T={args.t_steps} '
+          f'iters={args.iters} -> {args.out_dir}', flush=True)
+
+    total_decisions = 0
+    total_time = 0.0
+    for it in range(1, args.iters + 1):
+        t0 = time.time()
+        states, rng, batch = rollout(params, states, rng)
+        (obs_b, act_b, logp_b, val_b, mask_b, phase_b,
+         player_b, predone_b, rew_b, done_b) = [np.asarray(x) for x in batch]
+        total_decisions += args.n_envs * args.t_steps
+
+        adv, ret, keep = compute_gae(player_b, val_b, rew_b, done_b, predone_b,
+                                     lam=args.gae_lambda)
+        idx = np.where(keep.ravel())[0]
+        if len(idx) == 0:
+            print(f'[ppo] iter {it}: no kept samples, skip update', flush=True)
+            continue
+        flat = lambda a: a.reshape(-1, *a.shape[2:])[idx]
+        data = {
+            'obs': jnp.asarray(flat(obs_b)),
+            'act': jnp.asarray(flat(act_b)),
+            'logp_old': jnp.asarray(flat(logp_b)),
+            'mask': jnp.asarray(flat(mask_b)),
+            'phase': jnp.asarray(flat(phase_b)),
+            'adv': flat(adv).astype(np.float32),
+            'ret': jnp.asarray(flat(ret)),
+        }
+        data['adv'] = (data['adv'] - data['adv'].mean()) / (data['adv'].std() + 1e-8)
+        data['adv'] = jnp.asarray(data['adv'])
+        M = len(idx)
+
+        rng_np = np.random.default_rng(args.seed + it)
+        agg = {}
+        for _ in range(args.epochs):
+            perm = rng_np.permutation(M)
+            for s in range(0, M, args.minibatch_size):
+                mb_idx = perm[s:s + args.minibatch_size]
+                mb = {k: v[mb_idx] for k, v in data.items()}
+                params, opt_state, loss, aux = train_step(
+                    params, opt_state, ref_params, mb)
+                for kk, vv in [('loss', loss)] + list(aux.items()):
+                    agg.setdefault(kk, []).append(float(vv))
+        dt = time.time() - t0
+        total_time += dt
+        dps = args.n_envs * args.t_steps / dt
+        msg = {k: float(np.mean(v)) for k, v in agg.items()}
+        print(f'[ppo] iter {it}/{args.iters} kept={M}/{keep.size} '
+              + ' '.join(f'{k}={v:+.4f}' for k, v in sorted(msg.items()))
+              + f' time={dt:.1f}s ({dps:.0f} dec/s)', flush=True)
+        mlog.write(json.dumps({'type': 'train', 'iter': it, 'kept': int(M),
+                               **msg, 'time': dt}) + '\n')
+
+        if it % args.eval_every == 0:
+            k_eval, k1, k3 = jax.random.split(k_eval, 3)
+            m1 = play_eval(eval_step, params, ref_params, args.eval_games,
+                           np.array([True, False, False, False]), k1)
+            m3 = play_eval(eval_step, params, ref_params, args.eval_games,
+                           np.array([True, True, True, False]), k3)
+            print(f'[eval] iter {it} 1v3: win_diff={m1["win_diff"]:+.3f} '
+                  f'(cur {m1["cur_win"]:.3f} vs ref {m1["ref_win"]:.3f}) '
+                  f'draw={m1["draw"]:.3f} dealin(cur/ref)='
+                  f'{m1["cur_dealin"]:.3f}/{m1["ref_dealin"]:.3f}', flush=True)
+            print(f'[eval] iter {it} 3v1: win_diff={m3["win_diff"]:+.3f} '
+                  f'(cur {m3["cur_win"]:.3f} vs ref {m3["ref_win"]:.3f}) '
+                  f'draw={m3["draw"]:.3f} dealin(cur/ref)='
+                  f'{m3["cur_dealin"]:.3f}/{m3["ref_dealin"]:.3f}', flush=True)
+            mlog.write(json.dumps({'type': 'eval', 'iter': it,
+                                   '1v3': m1, '3v1': m3}) + '\n')
+
+        if it % args.save_every == 0:
+            ckpt = os.path.join(args.out_dir, f'iter{it}.msgpack')
+            with open(ckpt, 'wb') as f:
+                f.write(serialization.to_bytes({'params': params}))
+            print(f'[ppo] saved {ckpt}', flush=True)
+
+    if args.iters % args.save_every != 0:
+        ckpt = os.path.join(args.out_dir, f'iter{args.iters}.msgpack')
+        with open(ckpt, 'wb') as f:
+            f.write(serialization.to_bytes({'params': params}))
+        print(f'[ppo] saved final {ckpt}', flush=True)
+
+    if total_time > 0:
+        print(f'[ppo] throughput: {total_decisions / total_time:.0f} decisions/s '
+              f'({total_decisions} decisions in {total_time:.1f}s, incl. training)',
+              flush=True)
+    mlog.close()
+
+
+if __name__ == '__main__':
+    main()

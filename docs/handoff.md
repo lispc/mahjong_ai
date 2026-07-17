@@ -76,6 +76,31 @@ PYTHONPATH=. python3 scripts/rl/benchmark_duplicate.py \
 
 ## 4. 项目状态（2026-07-17）——**RL/自对弈 bootstrap 冲刺完成，判死**
 
+### 方向 0/2（god-mode 上界 + PTIE critic，2026-07-17 下午，双关闭）
+
+- **方向 0**：完美隐藏手牌信息（精确剩余分布 + 精确点炮规避）在 BeliefExp 结构内
+  仅值 **+1.2% [+0.3,+2.1]** 胜率（2000 pairs）；god-mode BeliefExp 仍比 best 低
+  7.5pp——信息通道已榨干，剩余空间不在「知道更多」。
+- **方向 2**：完美信息 critic（PTIE）val corr 0.2525 ≈ v1 的 0.231——**信用分配
+  SNR 根因 = 游戏内在随机性（未来牌山），非隐藏信息**；确认性 AWBC +0.3%
+  [−0.8,+1.4] 未过线，关闭。
+- 详见 `docs/reports/godmode-ptie-0717.md`。方向 1（JAX 引擎 + KL 锚 PPO）按
+  证据门执行中，见 `docs/reports/web-research-directions-0717.md` §5。
+
+### 方向 1（JAX 引擎 + KL 锚 PPO，2026-07-17 晚，已关闭：不晋升）
+
+- `jaxenv/` 管线交付：JAX 晋北引擎（**547k steps/s**@batch4096 单 3090 ≈ Python
+  自对弈 68×；is_win/shanten 各 100k 例 0 失配、场景 9/9、不变量 260 局、
+  分布对比容差内）、Flax 移植（全 head 对齐 <1e-4）、obs 对齐（1200 状态
+  <1e-6）、PPO+KL 锚脚本（Mahjax 配方）。
+- pilot（49.8M decisions，2.16h）**全程无坍缩**（KL 0.038、流局 ~1%）——
+  项目史上首个稳定在线 RL；in-env margin vs 纯 NN ref +3pp（plateau）。
+- **arena 裁决**：1000-pair 筛查 +1.2% 过线 → 5000-pair 独立种子确认
+  **+0.2% [−0.5,+0.9]**，winner's curse（协议第三次实战拦截），**不晋升，关闭**。
+- 归因：PPO 改进的状态类与搜索层高度重叠，不穿透部署结构；与方向 0/2 共同
+  构成「在位者近可达上界」完整证据链。`jaxenv/` 留存为基础设施。
+- 详见 `docs/reports/jax-rl-0717.md`。
+
 ### 方向 E（RL/NN/bootstrap 冲刺）：15 候选零晋升，证据定级判死
 
 - 一晚上按 eval-protocol 筛查 **15 个候选**（1000-pair duplicate arena 各一次），

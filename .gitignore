@@ -14,3 +14,4 @@ __pycache__/
 output/
 output_old/
 build/
+jaxenv/tables.npz

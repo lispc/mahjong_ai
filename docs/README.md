@@ -15,6 +15,9 @@
 
 | 文档 | 主题 |
 |---|---|
+| [`reports/web-research-directions-0717.md`](reports/web-research-directions-0717.md) | **下一步方向评估**：25 份文档通读 + 网络调研（Mahjax/Mortal/PerfectDou/Tjong/Gumbel），方向 0/1/2 执行计划 |
+| [`reports/godmode-ptie-0717.md`](reports/godmode-ptie-0717.md) | **方向 0+2 结果**：god-mode 上界（信息通道 ≤1.2pp）；PTIE critic 门 FAIL（corr 0.253≈0.231，SNR 根因=内在随机性）；方向 2 关闭 |
+| [`reports/jax-rl-0717.md`](reports/jax-rl-0717.md) | **方向 1（已关闭）**：JAX 引擎（547k steps/s）+ KL 锚 PPO pilot 50M 步；筛查 +1.2% → 5000-pair 确认 +0.2%（winner's curse），不晋升；jaxenv 留存为基础设施 |
 | [`reports/duplicate-reanalysis-0716.md`](reports/duplicate-reanalysis-0716.md) | **Duplicate 配对统计 bug 修正**：fable-5 的「best 不如 Baseline」结论反转，全部历史 pkl 重算 |
 | [`reports/endgame-solver-ab-0716.md`](reports/endgame-solver-ab-0716.md) | **方向 A/B 判死**：终盘精确求解四重证据阴性（oracle 上界为零）；点炮 82% 属默听，前沿移交方向 D |
 | [`reports/silent-tenpai-d-0716.md`](reports/silent-tenpai-d-0716.md) | **方向 D**：默听检测离线解决（seq AUC 0.92）但接入不复现胜率；winner's curse 被协议拦截的实例 |
