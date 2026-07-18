@@ -130,7 +130,8 @@ def _pi_prime_batched(params, model, states, skeys, search_cfg):
 
 
 def make_rollout_fn(model, t_steps, search_cfg=None, play_searched=False,
-                    pool_w=None):
+                    pool_w=None, reward_kind=env_mod.REWARD_SCORE,
+                    auto_hu=False, no_tenpai=False):
     """返回 jitted (params, opp_params, states, seat_types, rng)
         -> (states', seat_types', rng', batch) 函数。
 
@@ -141,6 +142,10 @@ def make_rollout_fn(model, t_steps, search_cfg=None, play_searched=False,
     pool_w: None（纯自对弈，行为与旧版逐 bit 一致）或 (4,) 座位类型权重；
     非 None 时 batch 额外含 seat_types(T,N,4)，reset 的局按权重重采样座位类型。
     opp_params: (gen1_params, bc_params)；权重为 0 的类型传 None（静态跳过前向）。
+    reward_kind: 环境奖励类型（score / winloss / score_dd），贯穿 init/reset。
+    auto_hu: CLAIM-hu 阶段强制 action=hu（能胡必胡，删 hu 决策维度）。
+    no_tenpai: TENPAI 阶段强制 action=no（报听恒否，删报听决策维度）。
+    两者仅改变行为动作；batch 末尾附 cstage 供训练侧剔除这些强制决策样本。
     """
     pool_active = pool_w is not None
     use_gen1 = pool_active and pool_w[OPP_GEN1] > 0
@@ -207,6 +212,15 @@ def make_rollout_fn(model, t_steps, search_cfg=None, play_searched=False,
                 agr = jax.vmap(greedy_action)(states)
                 act = jnp.where(stype == jnp.int8(OPP_GREEDY), agr, act)
 
+        # from-scratch 简化：hu 自动（能胡必胡）、报听恒否——对全部座位生效
+        if auto_hu:
+            act = jnp.where((phase == jnp.int8(env_mod.PHASE_CLAIM)) &
+                            (states.claim_stage == jnp.int8(env_mod.STAGE_HU)),
+                            jnp.int8(env_mod.A_HU), act)
+        if no_tenpai:
+            act = jnp.where(phase == jnp.int8(env_mod.PHASE_TENPAI),
+                            jnp.int8(env_mod.A_TENPAI_NO), act)
+
         logp_all = jax.nn.log_softmax(safe, axis=-1)
         logp = jnp.take_along_axis(logp_all, act[:, None].astype(jnp.int32), -1)[:, 0]
         val = out['value'][:, 0]
@@ -215,7 +229,7 @@ def make_rollout_fn(model, t_steps, search_cfg=None, play_searched=False,
 
         # 同一步内自动重置：先记终局（上方 batch 输出），再用新局替换
         keys = jax.random.split(k_reset, states.done.shape[0])
-        fresh = jax.vmap(env_mod.init)(keys)
+        fresh = jax.vmap(lambda k: env_mod.init(k, reward_kind))(keys)
 
         def pick(f, s):
             return jnp.where(done.reshape(-1, *([1] * (f.ndim - 1))), f, s)
@@ -230,7 +244,7 @@ def make_rollout_fn(model, t_steps, search_cfg=None, play_searched=False,
             seat_types2 = seat_types
 
         batch = (obs, act, logp, val, masks, phase, player, pre_done, rew, done,
-                 seat_types) + extra
+                 seat_types, states.claim_stage) + extra
         return (params, opp_params, states2, seat_types2, rng), batch
 
     @jax.jit
@@ -464,6 +478,18 @@ def main():
                     help='ply2 计算 π\' 时每次 vmap 的 env 数（lax.map 分块；0=整批）')
     ap.add_argument('--no-play-searched', action='store_true',
                     help='gumbel 模式下仍用 prior 采样出牌（消融用；默认从 π\' 采样）')
+    ap.add_argument('--reward-kind', default=env_mod.REWARD_SCORE,
+                    choices=[env_mod.REWARD_SCORE, env_mod.REWARD_WINLOSS,
+                             env_mod.REWARD_DD],
+                    help='环境奖励类型；score_dd = score + 流局全员 -0.25（from-scratch 用）')
+    ap.add_argument('--anchor-refresh', type=int, default=0,
+                    help='每 N iters 把 KL 锚 ref_params 刷新为当前 params（NPG 移动锚；0=不换）')
+    ap.add_argument('--auto-hu', action='store_true',
+                    help='CLAIM-hu 阶段强制能胡必胡（删 hu 决策维度；样本从训练剔除）')
+    ap.add_argument('--no-tenpai', action='store_true',
+                    help='TENPAI 阶段强制报听恒否（删报听决策维度；样本从训练剔除）')
+    ap.add_argument('--eval-greedy', action='store_true',
+                    help='eval 额外跑 vs shanten-greedy（from-scratch 里程碑指标）')
     # 对手池：CUR,GEN1,BC,GREEDY 四个 0-1 权重（和为 1；缺省纯自对弈）
     ap.add_argument('--opp-pool', default='1,0,0,0',
                     help='座位类型权重 CUR,GEN1,BC,GREEDY，如 0.5,0.2,0.2,0.1')
@@ -509,16 +535,19 @@ def main():
         play_searched = not args.no_play_searched
 
     rollout = make_rollout_fn(model, args.t_steps, search_cfg, play_searched,
-                              pool_w if pool_active else None)
+                              pool_w if pool_active else None,
+                              reward_kind=args.reward_kind,
+                              auto_hu=args.auto_hu, no_tenpai=args.no_tenpai)
     train_step = make_train_step(model, tx, args.clip, args.vf_coef,
                                  args.ent_coef, args.kl_coef, args.target_mode)
     eval_step = make_eval_step(model)
     eval_step_greedy = make_eval_step_greedy(model) \
-        if pool_active and pool_w[OPP_GREEDY] > 0 else None
+        if (pool_active and pool_w[OPP_GREEDY] > 0) or args.eval_greedy else None
 
     rng = jax.random.PRNGKey(args.seed)
     rng, k_init, k_eval = jax.random.split(rng, 3)
-    states = jax.vmap(env_mod.init)(jax.random.split(k_init, args.n_envs))
+    states = jax.vmap(lambda k: env_mod.init(k, args.reward_kind))(
+        jax.random.split(k_init, args.n_envs))
     if pool_active:
         rng, k_st = jax.random.split(rng)
         pl = jnp.log(jnp.clip(jnp.asarray(pool_w, jnp.float32), 1e-9, 1.0))
@@ -549,16 +578,22 @@ def main():
             params, opp_params, states, seat_types, rng)
         if search_cfg is not None:
             (obs_b, act_b, logp_b, val_b, mask_b, phase_b, player_b, predone_b,
-             rew_b, done_b, st_b, pi_b, parg_b, piarg_b) = \
+             rew_b, done_b, st_b, cstage_b, pi_b, parg_b, piarg_b) = \
                 [np.asarray(x) for x in batch]
         else:
             (obs_b, act_b, logp_b, val_b, mask_b, phase_b, player_b, predone_b,
-             rew_b, done_b, st_b) = [np.asarray(x) for x in batch]
+             rew_b, done_b, st_b, cstage_b) = [np.asarray(x) for x in batch]
         total_decisions += args.n_envs * args.t_steps
 
         adv, ret, keep = compute_gae(player_b, val_b, rew_b, done_b, predone_b,
                                      seat_types=st_b if pool_active else None,
                                      lam=args.gae_lambda)
+        # 强制决策（auto-hu / no-tenpai）是环境行为而非策略选择，样本从训练剔除
+        if args.auto_hu:
+            keep &= ~((phase_b == env_mod.PHASE_CLAIM) &
+                      (cstage_b == env_mod.STAGE_HU))
+        if args.no_tenpai:
+            keep &= ~(phase_b == env_mod.PHASE_TENPAI)
         # G1 门指标：prior argmax == π' argmax 的比例（kept DISCARD 决策）
         agree = None
         if search_cfg is not None:
@@ -665,6 +700,10 @@ def main():
             with open(ckpt, 'wb') as f:
                 f.write(serialization.to_bytes({'params': params}))
             print(f'[ppo] saved {ckpt}', flush=True)
+
+        if args.anchor_refresh > 0 and it % args.anchor_refresh == 0:
+            ref_params = params   # NPG 移动锚：KL 锚推进到当前代
+            print(f'[ppo] iter {it}: anchor refreshed', flush=True)
 
     if args.iters % args.save_every != 0:
         ckpt = os.path.join(args.out_dir, f'iter{args.iters}.msgpack')

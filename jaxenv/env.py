@@ -61,6 +61,7 @@ WIN_DRAW = 3
 
 REWARD_SCORE = 'score'        # 自摸赢家 +3；点和赢家 +1、放炮者 -1；流局全 0
 REWARD_WINLOSS = 'winloss'    # 赢家 +1、其余 -1；流局全 0
+REWARD_DD = 'score_dd'        # 同 score，但流局全员 -0.25（防 from-scratch 冷启动停滞）
 DEFAULT_REWARD_KIND = REWARD_SCORE
 
 WALL_SIZE = 136
@@ -321,18 +322,23 @@ def _step_claim(state, action):
 # ---------------------------------------------------------------------------
 
 def _reward(state):
-    """reward (4,)：仅终局非零。score: 自摸 +3 / 点和 +1、放炮 -1；winloss: 赢家 +1 其余 -1。"""
+    """reward (4,)：仅终局非零。score: 自摸 +3 / 点和 +1、放炮 -1；winloss: 赢家 +1 其余 -1；
+    score_dd: 同 score，另流局全员 -0.25。"""
     won = state.done & (state.winner >= 0)
     base = jnp.zeros(4, jnp.float32)
     w = state.winner.astype(jnp.int32)
     if state.reward_kind == REWARD_WINLOSS:
         r = jnp.full(4, -1.0, jnp.float32).at[w].set(1.0)
-    else:
-        r = jnp.where(state.win_type == jnp.int8(WIN_SELF), base.at[w].add(3.0),
-            jnp.where(state.win_type == jnp.int8(WIN_RON),
-                      base.at[w].add(1.0).at[state.dealer.astype(jnp.int32)].add(-1.0),
-                      base))
-    return jnp.where(won, r, base)
+        return jnp.where(won, r, base)
+    r = jnp.where(state.win_type == jnp.int8(WIN_SELF), base.at[w].add(3.0),
+        jnp.where(state.win_type == jnp.int8(WIN_RON),
+                  base.at[w].add(1.0).at[state.dealer.astype(jnp.int32)].add(-1.0),
+                  base))
+    out = jnp.where(won, r, base)
+    if state.reward_kind == REWARD_DD:
+        is_draw = state.done & (state.winner < 0)
+        out = jnp.where(is_draw, jnp.full(4, -0.25, jnp.float32), out)
+    return out
 
 
 def step(state, action):
