@@ -87,6 +87,10 @@ class AgentFactory:
         if self.kind == 'ppo':
             return PPOAgent(f'PPO-{self.label}', model_path=self.path,
                             device='cpu', temperature=0.0)
+        if self.kind == 'autohu':
+            from algo.agents.auto_hu_ppo_agent import AutoHuPPOAgent
+            return AutoHuPPOAgent(f'AutoHu-{self.label}', model_path=self.path,
+                                  device='cpu', temperature=0.0)
         if self.kind == 'adapt':
             from algo.agents.adaptive_conv_agent import AdaptiveConvAgent
             return AdaptiveConvAgent(f'Adapt-{self.label}', model_path=self.path,
@@ -278,7 +282,7 @@ def _make_factory(token):
     if token.startswith('v3nnpck:'):
         k = token.split(':', 1)[1]
         return AgentFactory('v3nnpck', label=k), f'V3-NN-PC{k}'
-    for kind, prefix in (('ppo', 'PPO-'), ('v3rlcand', 'V3-RLcand-'),
+    for kind, prefix in (('ppo', 'PPO-'), ('autohu', 'AutoHu-'), ('v3rlcand', 'V3-RLcand-'),
                          ('v3rlunion', 'V3-RLunion-'), ('v3deep', 'V3d-'),
                          ('adapt', 'Adapt-'), ('mctsconv', 'MCTSconv-'),
                          ('defensive', 'Def-'), ('oppdef', 'OppDef-'),

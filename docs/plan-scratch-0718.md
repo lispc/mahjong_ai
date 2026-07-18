@@ -68,6 +68,22 @@ M3 不打包票（纯 NN 在本项目从未达到搜索层强度）。
     --save-every 20 --seed 10
   ```
 
-## 5. 结果（待填）
+## 5. 结果（进行中）
+
+### M1（2026-07-18 晚，**通过**）
+
+- 92 iters / 12.06M decisions / 3.7h（913 dec/s，GPU1）。
+- **流局率 97.9% → 1.8%**（S 曲线拐点在 iter 16-24，门 <50% 富余两个量级）；
+- **vs shanten-greedy cur_win 1.8% → 37.9%**（显著高于公平份额 25%，
+  1v3 win_diff 收敛到 −0.12）——从零学会牌效+防守仅用 ~9M 决策；
+- 移动锚（anchor-refresh 16）全程正常；kept ~108k/iter；无坍缩。
+- 结论：冷启动可行性的核心论证（精确声明/自摸真值从第一步免费）成立。
+- 产物：`output/jax_scratch_gen1/iter92.msgpack`（M2 起点）。
+
+### M2（2026-07-19 凌晨启动，进行中）
+
+- 同配置续训 380 iters（50M decisions，~14h），init=M1 iter92，seed 11。
+- 门：arena pool 400 胜率 ≥ Baseline（eval2 系首次被无 eval2 模型追平）。
+- 部署评测 token 已备：`autohu:LABEL:PATH`（benchmark_pool，AutoHuPPOAgent）。
 
 {{SCRATCH_RESULT}}
