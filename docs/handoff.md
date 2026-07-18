@@ -98,6 +98,10 @@ PYTHONPATH=. python3 scripts/rl/benchmark_duplicate.py \
   **−2.9% [−4.2,−1.7]** 显著倒退——自蒸馏回声室，与历史「二代递减」同构。
   AZ 迭代在当前形态下一代收敛；in-env eval 对二代是误导信号，arena paired 才是
   唯一可靠裁决。
+- **plan-0718 批次（2-ply 搜索目标 + 对手池，07-18 晚，零晋升）**：
+  A（2-ply）+0.9% [−1.7,+3.5]、B（对手池）−0.2% [−2.9,+2.5]，均未过 +1.0% 线。
+  一代的 gumbel 改进是「一次性收割」，后续旋钮（更深搜索/多样化/自迭代）全部
+  落在噪声带内。详见 `docs/plan-0718.md` §4。
 - 详见 `docs/reports/jax-rl-0717.md` 附录。
 
 ### 方向 0/2（god-mode 上界 + PTIE critic，2026-07-17 下午，双关闭）
