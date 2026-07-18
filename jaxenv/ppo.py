@@ -32,6 +32,23 @@
     样本的 PPO surrogate 替换为 CE(π')（CLAIM/TENPAI 仍用 surrogate），出牌动作
     默认从 π' 采样（--no-play-searched 关闭）；日志/metrics.jsonl 增加 agree
     字段（prior argmax == π' argmax 比例，kept DISCARD 决策上统计）。
+    --search-ply2：top-2 候选改算 best-first 2-ply Q（jump 截断取下一状态的
+    search_value，--search-k2 控制叶状态候选数）；--search-chunk 控制每次
+    vmap 的 env 数（lax.map 分块，防 ply2 大 batch 爆显存）。
+
+对手池（--opp-pool CUR,GEN1,BC,GREEDY，缺省 1,0,0,0 = 纯自对弈，逐位行为与旧版
+逐 bit 一致）：
+- 每局 init/reset 时按权重为每个座位独立采样类型：CUR=当前 params（学习对象），
+  GEN1=--opp-gen1 冻结 msgpack，BC=--init 冻结副本（=KL 锚 ref），GREEDY=
+  jaxenv/greedy.py 的 shanten 贪心。reset（done 自动开新局）时同步重采样。
+- rollout 每步对全 batch 算 current/gen1/BC 三个 net 的前向 + greedy action，
+  按 seat_types[env, actor] 选择本步动作（3× 前向成本；gen1/BC 权重为 0 的类型
+  在 trace 时静态跳过其前向）。gumbel 搜索目标只用 current net 计算（静态形状
+  下仍 vmap 全 batch，但仅 current 座位的样本被 keep 消费，见下）。
+- 训练数据只保留 current 座位：GAE keep 掩码加 seat_types==CUR 条件；gumbel CE、
+  agree 统计均随之只在 current 座位决策上生效。终局 reward 仍按座位照常分配。
+- 日志：每 iter 打印各类型座位占比；eval 除 1v3/3v1（vs ref）外，池含 GEN1 时
+  加当前 argmax vs gen1 argmax 1v3，含 GREEDY 时加当前 argmax vs greedy 1v3。
 """
 
 import argparse
@@ -48,12 +65,17 @@ from flax import serialization
 import optax
 
 from jaxenv import env as env_mod
+from jaxenv.greedy import greedy_action
 from jaxenv.model_flax import build_model_flax
 from jaxenv.obs import observe, actor_of, OBS_DIM
-from jaxenv.search import improved_policy
+from jaxenv.search import improved_policy, improved_policy_ply2
 
 NEG = -1e9
 N_ACTIONS = env_mod.N_ACTIONS
+
+# 对手池座位类型
+OPP_CUR, OPP_GEN1, OPP_BC, OPP_GREEDY = 0, 1, 2, 3
+OPP_NAMES = ('CUR', 'GEN1', 'BC', 'GREEDY')
 
 
 # ---------------------------------------------------------------------------
@@ -77,17 +99,63 @@ def build_logits(out, phase, mask):
 # rollout（scan 版本：一次 jit 调用跑 T 步）
 # ---------------------------------------------------------------------------
 
-def make_rollout_fn(model, t_steps, search_cfg=None, play_searched=False):
-    """返回 jitted (params, states, rng) -> (states', rng', batch) 函数。
+def _pi_prime_batched(params, model, states, skeys, search_cfg):
+    """(N,) 状态 -> π' (N,34)。
 
-    search_cfg: None（outcome 模式）或 dict(k=, draws=, beta=)（gumbel 模式）。
-    gumbel 模式下 batch 额外含 (pi_prime(T,N,34), prior_arg(T,N), pi_arg(T,N))；
-    play_searched=True 时 DISCARD 决策改从 π' 采样（AZ 闭环）。
+    1-ply（无 ply2 键）与原 improved_policy vmap 完全一致。ply2 模式用
+    improved_policy_ply2，并按 search_cfg['chunk'] 分块 lax.map：单次 vmap 的
+    网络前向行数 ∝ chunk × 候选×子状态数，防大 N 下峰值显存过高；N 不能整除
+    chunk（或 chunk<=0）时退回整批 vmap。
     """
+    if not search_cfg.get('ply2'):
+        pi, _, _ = jax.vmap(lambda st, kk: improved_policy(
+            params, model, st, kk, search_cfg['k'], search_cfg['draws'],
+            search_cfg['beta']))(states, skeys)
+        return pi
+
+    def one(st, kk):
+        return improved_policy_ply2(params, model, st, kk, search_cfg['k'],
+                                    search_cfg['draws'], search_cfg['beta'],
+                                    search_cfg['k2'],
+                                    n_top2=search_cfg.get('top2', 2))[0]
+    n = states.done.shape[0]
+    chunk = search_cfg.get('chunk') or 0
+    if chunk <= 0 or n % chunk != 0:
+        return jax.vmap(one)(states, skeys)
+    c = n // chunk
+    sr = jax.tree.map(lambda x: x.reshape((c, chunk) + x.shape[1:]), states)
+    kr = skeys.reshape(c, chunk, 2)
+    pi = jax.lax.map(lambda xs: jax.vmap(one)(*xs), (sr, kr))     # (c, chunk, 34)
+    return pi.reshape(n, 34)
+
+
+def make_rollout_fn(model, t_steps, search_cfg=None, play_searched=False,
+                    pool_w=None):
+    """返回 jitted (params, opp_params, states, seat_types, rng)
+        -> (states', seat_types', rng', batch) 函数。
+
+    search_cfg: None（outcome 模式）或 dict(k=, draws=, beta=)（gumbel 模式，
+    可选 ply2=/k2=/chunk= 键启用 best-first 2-ply，见 _pi_prime_batched）。
+    gumbel 模式下 batch 额外含 (pi_prime(T,N,34), prior_arg(T,N), pi_arg(T,N))；
+    play_searched=True 时 current 座位的 DISCARD 决策改从 π' 采样（AZ 闭环）。
+    pool_w: None（纯自对弈，行为与旧版逐 bit 一致）或 (4,) 座位类型权重；
+    非 None 时 batch 额外含 seat_types(T,N,4)，reset 的局按权重重采样座位类型。
+    opp_params: (gen1_params, bc_params)；权重为 0 的类型传 None（静态跳过前向）。
+    """
+    pool_active = pool_w is not None
+    use_gen1 = pool_active and pool_w[OPP_GEN1] > 0
+    use_bc = pool_active and pool_w[OPP_BC] > 0
+    use_greedy = pool_active and pool_w[OPP_GREEDY] > 0
+    if pool_active:
+        pool_logits = jnp.log(jnp.clip(jnp.asarray(pool_w, jnp.float32), 1e-9, 1.0))
 
     def body(carry, _):
-        params, states, rng = carry
-        rng, k_act, k_act2, k_reset, k_search = jax.random.split(rng, 5)
+        params, opp_params, states, seat_types, rng = carry
+        if pool_active:
+            rng, k_act, k_act2, k_reset, k_search, k_opp, k_seat = \
+                jax.random.split(rng, 7)
+        else:
+            rng, k_act, k_act2, k_reset, k_search = jax.random.split(rng, 5)
 
         obs = jax.vmap(observe)(states)                       # (N,175)
         out = model.apply({'params': params}, obs)
@@ -95,7 +163,8 @@ def make_rollout_fn(model, t_steps, search_cfg=None, play_searched=False):
         phase = states.phase
         player = jax.vmap(actor_of)(states)                   # (N,)
         pre_done = states.done
-        logits = build_logits(out, phase.astype(jnp.int32), masks)
+        phase32 = phase.astype(jnp.int32)
+        logits = build_logits(out, phase32, masks)
         # done 状态（天胡残留）mask 全 False：logits 置零保证采样有定义（no-op）
         safe = jnp.where(pre_done[:, None], jnp.zeros(N_ACTIONS, jnp.float32), logits)
         act = jax.random.categorical(k_act, safe, axis=-1).astype(jnp.int8)
@@ -103,9 +172,8 @@ def make_rollout_fn(model, t_steps, search_cfg=None, play_searched=False):
         extra = ()
         if search_cfg is not None:
             skeys = jax.random.split(k_search, states.done.shape[0])
-            pi_prime, _, _ = jax.vmap(lambda st, kk: improved_policy(
-                params, model, st, kk, search_cfg['k'], search_cfg['draws'],
-                search_cfg['beta']))(states, skeys)           # (N,34)
+            pi_prime = _pi_prime_batched(params, model, states, skeys,
+                                         search_cfg)              # (N,34)
             if play_searched:
                 log_pi = jnp.where(pi_prime > 0, jnp.log(pi_prime), NEG)
                 safe_pi = jnp.where(pre_done[:, None],
@@ -116,6 +184,28 @@ def make_rollout_fn(model, t_steps, search_cfg=None, play_searched=False):
                                    -1).astype(jnp.int8)
             pi_arg = jnp.argmax(pi_prime, -1).astype(jnp.int8)
             extra = (pi_prime, prior_arg, pi_arg)
+
+        # 对手池：非 current 座位按其类型覆盖动作（current 座位保持上面的 act）
+        if pool_active:
+            stype = seat_types[jnp.arange(states.done.shape[0]), player]   # (N,)
+            k_og, k_ob = jax.random.split(k_opp)
+            if use_gen1:
+                out_g = model.apply({'params': opp_params[0]}, obs)
+                lg = build_logits(out_g, phase32, masks)
+                sg = jnp.where(pre_done[:, None],
+                               jnp.zeros(N_ACTIONS, jnp.float32), lg)
+                ag = jax.random.categorical(k_og, sg, axis=-1).astype(jnp.int8)
+                act = jnp.where(stype == jnp.int8(OPP_GEN1), ag, act)
+            if use_bc:
+                out_b = model.apply({'params': opp_params[1]}, obs)
+                lb = build_logits(out_b, phase32, masks)
+                sb = jnp.where(pre_done[:, None],
+                               jnp.zeros(N_ACTIONS, jnp.float32), lb)
+                ab = jax.random.categorical(k_ob, sb, axis=-1).astype(jnp.int8)
+                act = jnp.where(stype == jnp.int8(OPP_BC), ab, act)
+            if use_greedy:
+                agr = jax.vmap(greedy_action)(states)
+                act = jnp.where(stype == jnp.int8(OPP_GREEDY), agr, act)
 
         logp_all = jax.nn.log_softmax(safe, axis=-1)
         logp = jnp.take_along_axis(logp_all, act[:, None].astype(jnp.int32), -1)[:, 0]
@@ -130,15 +220,24 @@ def make_rollout_fn(model, t_steps, search_cfg=None, play_searched=False):
         def pick(f, s):
             return jnp.where(done.reshape(-1, *([1] * (f.ndim - 1))), f, s)
         states2 = jax.tree.map(pick, fresh, new_states)
+        if pool_active:
+            # reset 的局按池权重为 4 个座位重采样类型
+            new_st = jax.random.categorical(
+                k_seat, jnp.broadcast_to(pool_logits, (*seat_types.shape, 4)),
+                axis=-1).astype(jnp.int8)
+            seat_types2 = jnp.where(done[:, None], new_st, seat_types)
+        else:
+            seat_types2 = seat_types
 
-        batch = (obs, act, logp, val, masks, phase, player, pre_done, rew, done) + extra
-        return (params, states2, rng), batch
+        batch = (obs, act, logp, val, masks, phase, player, pre_done, rew, done,
+                 seat_types) + extra
+        return (params, opp_params, states2, seat_types2, rng), batch
 
     @jax.jit
-    def rollout(params, states, rng):
-        (params, states, rng), batch = jax.lax.scan(
-            body, (params, states, rng), None, length=t_steps)
-        return states, rng, batch
+    def rollout(params, opp_params, states, seat_types, rng):
+        (params, opp_params, states, seat_types, rng), batch = jax.lax.scan(
+            body, (params, opp_params, states, seat_types, rng), None, length=t_steps)
+        return states, seat_types, rng, batch
 
     return rollout
 
@@ -147,11 +246,14 @@ def make_rollout_fn(model, t_steps, search_cfg=None, play_searched=False):
 # GAE（host 侧，按玩家子序列）
 # ---------------------------------------------------------------------------
 
-def compute_gae(players, values, rewards, dones, pre_done, lam=0.95):
+def compute_gae(players, values, rewards, dones, pre_done, seat_types=None,
+                lam=0.95):
     """players/values/dones/pre_done: (T,N) host 数组；rewards: (T,N,4)。
 
     γ=1。返回 adv/ret/keep (T,N)。每 env 最后一段未完成游戏整段 keep=False。
     pre_done（天胡 no-op 步）的决策不进任何子序列。
+    seat_types: None（纯自对弈）或 (T,N,4)；非 None 时只有 seat_types==OPP_CUR
+    的座位产生训练样本（对手池模式下非 current 座位不进 GAE）。
     """
     T, N = players.shape
     adv = np.zeros((T, N), np.float32)
@@ -164,6 +266,8 @@ def compute_gae(players, values, rewards, dones, pre_done, lam=0.95):
                 continue
             final_rew = rewards[t1, e]                       # (4,)
             for p in range(4):
+                if seat_types is not None and seat_types[t1, e, p] != OPP_CUR:
+                    continue                                # 非 current 座位不产样本
                 idxs = [t for t in range(t0, t1 + 1)
                         if players[t, e] == p and not pre_done[t, e]]
                 if not idxs:
@@ -260,16 +364,35 @@ def make_eval_step(model):
     return eval_step
 
 
-def play_eval(eval_step, cur_params, ref_params, n_games, cur_seat, rng,
-              max_steps=600):
-    """打 n_games 局（vmapped，argmax），返回指标 dict。cur_seat: (4,) bool。"""
+def make_eval_step_greedy(model):
+    """当前 argmax vs greedy_action 对手的 eval step。"""
+    @jax.jit
+    def eval_step(cur_params, states, cur_seat):
+        obs = jax.vmap(observe)(states)
+        masks = jax.vmap(env_mod.legal_mask)(states)
+        phase = states.phase.astype(jnp.int32)
+        out_c = model.apply({'params': cur_params}, obs)
+        lc = build_logits(out_c, phase, masks)
+        actor = jax.vmap(actor_of)(states)
+        use_cur = cur_seat[actor]                             # (N,) bool
+        safe = jnp.where(states.done[:, None], jnp.zeros(N_ACTIONS, jnp.float32), lc)
+        act_c = jnp.argmax(safe, -1).astype(jnp.int8)
+        act_g = jax.vmap(greedy_action)(states)
+        act = jnp.where(use_cur, act_c, act_g)
+        return jax.vmap(env_mod.step)(states, act)[0]
+
+    return eval_step
+
+
+def play_eval_generic(step_fn, n_games, cur_seat, rng, max_steps=600):
+    """打 n_games 局（vmapped），step_fn(states, seat) -> states。返回指标 dict。"""
     keys = jax.random.split(rng, n_games)
     states = jax.vmap(env_mod.init)(keys)
     seat = jnp.asarray(cur_seat, dtype=bool)
     for _ in range(max_steps):
         if bool(jnp.all(states.done)):
             break
-        states = eval_step(cur_params, ref_params, states, seat)
+        states = step_fn(states, seat)
     winner = np.asarray(states.winner)
     win_type = np.asarray(states.win_type)
     dealer = np.asarray(states.dealer)
@@ -284,6 +407,14 @@ def play_eval(eval_step, cur_params, ref_params, n_games, cur_seat, rng,
     return {'cur_win': cur_win, 'ref_win': ref_win,
             'win_diff': cur_win - ref_win, 'draw': draw,
             'cur_dealin': cur_deal, 'ref_dealin': ref_deal}
+
+
+def play_eval(eval_step, cur_params, ref_params, n_games, cur_seat, rng,
+              max_steps=600):
+    """当前 argmax vs ref argmax。cur_seat: (4,) bool。"""
+    return play_eval_generic(
+        lambda s, seat: eval_step(cur_params, ref_params, s, seat),
+        n_games, cur_seat, rng, max_steps)
 
 
 # ---------------------------------------------------------------------------
@@ -322,9 +453,30 @@ def main():
     ap.add_argument('--search-k', type=int, default=8)
     ap.add_argument('--search-draws', type=int, default=2)
     ap.add_argument('--search-beta', type=float, default=8.0)
+    ap.add_argument('--search-ply2', action='store_true',
+                    help='gumbel 模式下 top-2 候选改算 best-first 2-ply Q'
+                         '（jump 截断取下一状态的 search_value）')
+    ap.add_argument('--search-k2', type=int, default=4,
+                    help='2-ply 叶状态 search_value 的 top-k2 候选数（--search-ply2 时有效）')
+    ap.add_argument('--search-top2', type=int, default=2,
+                    help='2-ply 展开的根候选数 n_top2（--search-ply2 时有效；1 可约 2× 提速）')
+    ap.add_argument('--search-chunk', type=int, default=64,
+                    help='ply2 计算 π\' 时每次 vmap 的 env 数（lax.map 分块；0=整批）')
     ap.add_argument('--no-play-searched', action='store_true',
                     help='gumbel 模式下仍用 prior 采样出牌（消融用；默认从 π\' 采样）')
+    # 对手池：CUR,GEN1,BC,GREEDY 四个 0-1 权重（和为 1；缺省纯自对弈）
+    ap.add_argument('--opp-pool', default='1,0,0,0',
+                    help='座位类型权重 CUR,GEN1,BC,GREEDY，如 0.5,0.2,0.2,0.1')
+    ap.add_argument('--opp-gen1', default='output/jax_gumbel_pilot/iter92.msgpack',
+                    help='GEN1 对手的冻结 msgpack')
     args = ap.parse_args()
+
+    pool_w = np.array([float(x) for x in args.opp_pool.split(',')], np.float64)
+    assert pool_w.shape == (4,) and (pool_w >= 0).all(), \
+        f'--opp-pool 需为 4 个非负权重: {args.opp_pool}'
+    assert abs(pool_w.sum() - 1.0) < 1e-6, \
+        f'--opp-pool 权重和须为 1: {pool_w.sum()}'
+    pool_active = bool((pool_w[1:] > 0).any())
 
     os.makedirs(args.out_dir, exist_ok=True)
     with open(args.config) as f:
@@ -337,6 +489,12 @@ def main():
     params = load_params(args.init)
     ref_params = params                      # 冻结 KL 锚（params 为不可变 pytree）
 
+    # 对手池参数：GEN1 从 --opp-gen1 加载；BC = --init 的冻结副本（=ref_params）
+    gen1_params = load_params(args.opp_gen1) \
+        if pool_active and pool_w[OPP_GEN1] > 0 else None
+    bc_params = ref_params if pool_active and pool_w[OPP_BC] > 0 else None
+    opp_params = (gen1_params, bc_params)
+
     tx = optax.chain(optax.clip_by_global_norm(args.max_grad_norm),
                      optax.adam(args.lr))
     opt_state = tx.init(params)
@@ -345,41 +503,61 @@ def main():
     play_searched = False
     if args.target_mode == 'gumbel':
         search_cfg = {'k': args.search_k, 'draws': args.search_draws,
-                      'beta': args.search_beta}
+                      'beta': args.search_beta, 'ply2': args.search_ply2,
+                      'k2': args.search_k2, 'top2': args.search_top2,
+                      'chunk': args.search_chunk}
         play_searched = not args.no_play_searched
 
-    rollout = make_rollout_fn(model, args.t_steps, search_cfg, play_searched)
+    rollout = make_rollout_fn(model, args.t_steps, search_cfg, play_searched,
+                              pool_w if pool_active else None)
     train_step = make_train_step(model, tx, args.clip, args.vf_coef,
                                  args.ent_coef, args.kl_coef, args.target_mode)
     eval_step = make_eval_step(model)
+    eval_step_greedy = make_eval_step_greedy(model) \
+        if pool_active and pool_w[OPP_GREEDY] > 0 else None
 
     rng = jax.random.PRNGKey(args.seed)
     rng, k_init, k_eval = jax.random.split(rng, 3)
     states = jax.vmap(env_mod.init)(jax.random.split(k_init, args.n_envs))
+    if pool_active:
+        rng, k_st = jax.random.split(rng)
+        pl = jnp.log(jnp.clip(jnp.asarray(pool_w, jnp.float32), 1e-9, 1.0))
+        seat_types = jax.random.categorical(
+            k_st, jnp.broadcast_to(pl, (args.n_envs, 4, 4)), axis=-1).astype(jnp.int8)
+    else:
+        seat_types = jnp.zeros((args.n_envs, 4), jnp.int8)
 
     metrics_path = os.path.join(args.out_dir, 'metrics.jsonl')
     mlog = open(metrics_path, 'a', buffering=1)
     print(f'[ppo] init={args.init} n_envs={args.n_envs} T={args.t_steps} '
           f'iters={args.iters} target={args.target_mode}'
           + (f' (k={args.search_k} draws={args.search_draws} '
-             f'beta={args.search_beta} play_searched={play_searched})'
+             f'beta={args.search_beta} play_searched={play_searched}'
+             + (f' ply2(k2={args.search_k2} chunk={args.search_chunk})'
+                if args.search_ply2 else '') + ')'
              if search_cfg else '')
+          + (f' opp_pool={args.opp_pool}'
+             + (f' gen1={args.opp_gen1}' if gen1_params is not None else '')
+             if pool_active else '')
           + f' -> {args.out_dir}', flush=True)
 
     total_decisions = 0
     total_time = 0.0
     for it in range(1, args.iters + 1):
         t0 = time.time()
-        states, rng, batch = rollout(params, states, rng)
+        states, seat_types, rng, batch = rollout(
+            params, opp_params, states, seat_types, rng)
         if search_cfg is not None:
             (obs_b, act_b, logp_b, val_b, mask_b, phase_b, player_b, predone_b,
-             rew_b, done_b, pi_b, parg_b, piarg_b) = [np.asarray(x) for x in batch]
+             rew_b, done_b, st_b, pi_b, parg_b, piarg_b) = \
+                [np.asarray(x) for x in batch]
         else:
-            (obs_b, act_b, logp_b, val_b, mask_b, phase_b,
-             player_b, predone_b, rew_b, done_b) = [np.asarray(x) for x in batch]
+            (obs_b, act_b, logp_b, val_b, mask_b, phase_b, player_b, predone_b,
+             rew_b, done_b, st_b) = [np.asarray(x) for x in batch]
         total_decisions += args.n_envs * args.t_steps
 
         adv, ret, keep = compute_gae(player_b, val_b, rew_b, done_b, predone_b,
+                                     seat_types=st_b if pool_active else None,
                                      lam=args.gae_lambda)
         # G1 门指标：prior argmax == π' argmax 的比例（kept DISCARD 决策）
         agree = None
@@ -426,15 +604,26 @@ def main():
                 + ' '.join(f'{k}={v:+.4f}' for k, v in sorted(msg.items())))
         if agree is not None:
             line += f' agree={agree:.4f}'
+        seat_frac = None
+        if pool_active:
+            seat_frac = {OPP_NAMES[t]: float((st_b == t).mean()) for t in range(4)
+                         if pool_w[t] > 0}
+            line += ' pool={' + ', '.join(f'{k}:{v:.2f}' for k, v in
+                                          seat_frac.items()) + '}'
         line += f' time={dt:.1f}s ({dps:.0f} dec/s)'
         print(line, flush=True)
         rec = {'type': 'train', 'iter': it, 'kept': int(M), **msg, 'time': dt}
         if agree is not None:
             rec['agree'] = agree
+        if seat_frac is not None:
+            rec['pool'] = seat_frac
         mlog.write(json.dumps(rec) + '\n')
 
         if it % args.eval_every == 0:
-            k_eval, k1, k3 = jax.random.split(k_eval, 3)
+            n_extra = int(gen1_params is not None) + int(eval_step_greedy is not None)
+            ks = jax.random.split(k_eval, 3 + n_extra)
+            k_eval = ks[0]
+            k1, k3 = ks[1], ks[2]
             m1 = play_eval(eval_step, params, ref_params, args.eval_games,
                            np.array([True, False, False, False]), k1)
             m3 = play_eval(eval_step, params, ref_params, args.eval_games,
@@ -447,8 +636,29 @@ def main():
                   f'(cur {m3["cur_win"]:.3f} vs ref {m3["ref_win"]:.3f}) '
                   f'draw={m3["draw"]:.3f} dealin(cur/ref)='
                   f'{m3["cur_dealin"]:.3f}/{m3["ref_dealin"]:.3f}', flush=True)
-            mlog.write(json.dumps({'type': 'eval', 'iter': it,
-                                   '1v3': m1, '3v1': m3}) + '\n')
+            ev_rec = {'type': 'eval', 'iter': it, '1v3': m1, '3v1': m3}
+            ki = 3
+            if gen1_params is not None:
+                mg = play_eval(eval_step, params, gen1_params, args.eval_games,
+                               np.array([True, False, False, False]), ks[ki])
+                ki += 1
+                print(f'[eval] iter {it} vs_gen1 1v3: win_diff='
+                      f'{mg["win_diff"]:+.3f} (cur {mg["cur_win"]:.3f} vs gen1 '
+                      f'{mg["ref_win"]:.3f}) draw={mg["draw"]:.3f} '
+                      f'dealin(cur/gen1)={mg["cur_dealin"]:.3f}/'
+                      f'{mg["ref_dealin"]:.3f}', flush=True)
+                ev_rec['vs_gen1'] = mg
+            if eval_step_greedy is not None:
+                mgr = play_eval_generic(
+                    lambda s, seat: eval_step_greedy(params, s, seat),
+                    args.eval_games, np.array([True, False, False, False]), ks[ki])
+                print(f'[eval] iter {it} vs_greedy 1v3: win_diff='
+                      f'{mgr["win_diff"]:+.3f} (cur {mgr["cur_win"]:.3f} vs greedy '
+                      f'{mgr["ref_win"]:.3f}) draw={mgr["draw"]:.3f} '
+                      f'dealin(cur/greedy)={mgr["cur_dealin"]:.3f}/'
+                      f'{mgr["ref_dealin"]:.3f}', flush=True)
+                ev_rec['vs_greedy'] = mgr
+            mlog.write(json.dumps(ev_rec) + '\n')
 
         if it % args.save_every == 0:
             ckpt = os.path.join(args.out_dir, f'iter{it}.msgpack')

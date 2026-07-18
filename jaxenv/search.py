@@ -27,6 +27,12 @@
 
 全部为纯函数（可 jit/vmap）。每个根决策共 3 次批量网络前向：
 prior(1 行) + response(9k 行) + jump value(7·n_draws·k 行)。
+
+best-first 2-ply 扩展（improved_policy_ply2）：top-k 候选同 1-ply，其中按含噪
+排序的前 n_top2 个候选的 jump 截断不再取 V，而是对「根玩家摸到牌后的下一状态」
+算 1-ply 改进价值 search_value：该状态按 policy logits 取 top-k2（不加新 Gumbel），
+各算完整 1-ply Q，按该状态 π'（softmax(logits+beta*(Q−V))）加权的期望 Q 作叶值
+（非 top-k2 合法动作 Q=V 补齐）。其余 k−n_top2 个候选仍 1-ply（V 截断）。
 """
 
 import jax
@@ -151,8 +157,8 @@ def _jump_values(params, model, stacked, root, keys, dead, n_draws):
 # 单候选弃牌的 Q
 # ---------------------------------------------------------------------------
 
-def _q_discard(params, model, state, a, key, n_draws):
-    """根玩家（state.turn）在 DISCARD state 弃 a 的 Q（score/3 尺度）。"""
+def _prep_claim(params, model, state, a):
+    """根玩家（state.turn）弃 a 后的中间状态 st 与 9 个声明位的 P(claim)。"""
     d = state.turn.astype(jnp.int32)
     t = a.astype(jnp.int32)
     st = state.replace(hands=state.hands.at[d, t].add(-1),
@@ -165,17 +171,28 @@ def _q_discard(params, model, state, a, key, n_draws):
     resp = model.apply({'params': params}, obs9)['response']      # [9, 4]
     p_claim = jax.nn.sigmoid(resp[jnp.arange(9), _CLAIM_RESP_IDX] - resp[:, 0])
     p_claim = jnp.where(bits, p_claim, 0.0)
-    stacked, dead = _branch_states(st, a)
-    jumpv = _jump_values(params, model, stacked, d,
-                         jax.random.split(key, 7), dead, n_draws)  # [7]
+    return st, p_claim
+
+
+def _walk_q(p_claim, jumpv):
+    """按 env 声明顺序（胡→杠→碰，各 offset 1..3）走 9 位 walk，得 Q。"""
     val9 = jnp.concatenate([jnp.full(3, HU_VALUE, jnp.float32), jumpv[:6]])
-    # 按 env 声明顺序（胡→杠→碰，各 offset 1..3）走 walk
     rem = jnp.float32(1.0)
     acc = jnp.float32(0.0)
     for i in range(9):
         acc = acc + rem * p_claim[i] * val9[i]
         rem = rem * (1.0 - p_claim[i])
     return acc + rem * jumpv[6]
+
+
+def _q_discard(params, model, state, a, key, n_draws):
+    """根玩家（state.turn）在 DISCARD state 弃 a 的 Q（score/3 尺度）。"""
+    d = state.turn.astype(jnp.int32)
+    st, p_claim = _prep_claim(params, model, state, a)
+    stacked, dead = _branch_states(st, a)
+    jumpv = _jump_values(params, model, stacked, d,
+                         jax.random.split(key, 7), dead, n_draws)  # [7]
+    return _walk_q(p_claim, jumpv)
 
 
 # ---------------------------------------------------------------------------
@@ -204,6 +221,107 @@ def improved_policy(params, model, state, key, k=8, n_draws=2, beta=8.0):
     keys = jax.random.split(key_c, k)
     q_raw = jax.vmap(lambda aa, kk: _q_discard(params, model, state, aa, kk, n_draws))(
         topa, keys)
+    q_top = jnp.where(valid, q_raw, v)
+    # completed-Q：非 top-k 合法动作 Q=V（top_k 返回的索引互异，scatter 安全）
+    q_full = jnp.full(34, v, jnp.float32).at[topa].set(q_top)
+    adj = jnp.where(legal, logits + beta * (q_full - v), NEG)
+    pi = jax.nn.softmax(adj)
+    return pi, q_top, v
+
+
+# ---------------------------------------------------------------------------
+# best-first 2-ply
+# ---------------------------------------------------------------------------
+
+def _search_value(params, model, st, key, k2, n_draws, beta):
+    """DISCARD state st 的 1-ply 改进策略期望 Q（2-ply 叶值）。
+
+    按 policy logits 取 top-k2（不加新 Gumbel 噪声），各算完整 1-ply Q
+    （声明判定 + 摸牌采样 + V 截断）；其余合法动作 Q=V 补齐（completed-Q）。
+    返回 E_π'[Q_completed]，π' = masked softmax(logits + beta*(Q−V))。
+    """
+    obs = observe(st)
+    out = model.apply({'params': params}, obs[None])
+    logits = out['policy'][0]                                     # (34,)
+    v = out['value'][0, 0]
+    legal = env.legal_mask(st)[:34]
+    pert = jnp.where(legal, logits, NEG)
+    topv, topa = jax.lax.top_k(pert, k2)
+    valid = topv > NEG / 2
+    keys = jax.random.split(key, k2)
+    q_raw = jax.vmap(lambda aa, kk: _q_discard(params, model, st, aa, kk, n_draws))(
+        topa, keys)
+    q_top = jnp.where(valid, q_raw, v)
+    q_full = jnp.full(34, v, jnp.float32).at[topa].set(q_top)
+    adj = jnp.where(legal, logits + beta * (q_full - v), NEG)
+    pi = jax.nn.softmax(adj)
+    return (pi * q_full).sum()
+
+
+def _child_leaf(params, model, st, root, key, ok, k2, n_draws, beta):
+    """根玩家摸牌后状态 st 的 2-ply 叶值：自摸 +1，否则 _search_value；ok=False 补 0。"""
+    win = rules.is_win_counts(st.hands[root], st.n_melds[root])
+    sv = _search_value(params, model, st, key, k2, n_draws, beta)
+    return jnp.where(ok, jnp.where(win, SELFDRAW_VALUE, sv), 0.0)
+
+
+def _jump_values_ply2(params, model, stacked, root, keys, dead, n_draws, k2, beta,
+                      key_c):
+    """7 个分支状态的 2-ply 截断价值 [7]：jump 处取 _search_value 而非 V。"""
+    B = stacked.hands.shape[0]
+    dr, ok = jax.vmap(_root_draw_states, in_axes=(0, 0, None, None))(
+        stacked, keys, root, n_draws)
+    flat = jax.tree.map(lambda x: x.reshape((B * n_draws,) + x.shape[2:]), dr)
+    ok_f = ok.reshape(B * n_draws)
+    ckeys = jax.random.split(key_c, B * n_draws)
+    leaf = jax.vmap(lambda s, kk, oo: _child_leaf(params, model, s, root, kk, oo,
+                                                  k2, n_draws, beta))(
+        flat, ckeys, ok_f)
+    val = leaf.reshape(B, n_draws)
+    count = ok.sum(-1).astype(jnp.float32)
+    jumpv = jnp.where(count > 0, val.sum(-1) / jnp.maximum(count, 1.0), 0.0)
+    return jnp.where(dead, 0.0, jumpv)
+
+
+def _q_discard_ply2(params, model, state, a, key, n_draws, k2, beta):
+    """弃 a 的 2-ply Q：声明 walk 同 1-ply，jump 截断处取 search_value 而非 V。"""
+    d = state.turn.astype(jnp.int32)
+    st, p_claim = _prep_claim(params, model, state, a)
+    stacked, dead = _branch_states(st, a)
+    key_d, key_c = jax.random.split(key)
+    jumpv = _jump_values_ply2(params, model, stacked, d,
+                              jax.random.split(key_d, 7), dead, n_draws,
+                              k2, beta, key_c)                     # [7]
+    return _walk_q(p_claim, jumpv)
+
+
+def improved_policy_ply2(params, model, state, key, k=8, n_draws=2, beta=32.0,
+                         k2=4, n_top2=2):
+    """best-first 2-ply 版 improved_policy，接口与返回同 1-ply。
+
+    top-k 候选同 1-ply（Gumbel 噪声）；按含噪排序的前 n_top2 个候选用 2-ply Q
+    （jump 处取下一状态的 search_value），其余 k−n_top2 个候选仍 1-ply（V 截断）。
+    k / n_draws / k2 / n_top2 均为 Python int 常量，jit 下形状静态。
+    """
+    key_g, key_c, key_c2 = jax.random.split(key, 3)
+    obs = observe(state)
+    out = model.apply({'params': params}, obs[None])
+    logits = out['policy'][0]                                     # (34,)
+    v = out['value'][0, 0]
+    legal = env.legal_mask(state)[:34]
+    u = jnp.clip(jax.random.uniform(key_g, (34,)), 1e-9, 1.0 - 1e-9)
+    g = -jnp.log(-jnp.log(u))
+    pert = jnp.where(legal, logits + g, NEG)
+    topv, topa = jax.lax.top_k(pert, k)
+    valid = topv > NEG / 2
+    keys = jax.random.split(key_c, k)
+    q_lo = jax.vmap(lambda aa, kk: _q_discard(params, model, state, aa, kk,
+                                              n_draws))(topa[n_top2:], keys[n_top2:])
+    keys2 = jax.random.split(key_c2, n_top2)
+    q_hi = jax.vmap(lambda aa, kk: _q_discard_ply2(params, model, state, aa, kk,
+                                                   n_draws, k2, beta))(
+        topa[:n_top2], keys2)
+    q_raw = jnp.concatenate([q_hi, q_lo])
     q_top = jnp.where(valid, q_raw, v)
     # completed-Q：非 top-k 合法动作 Q=V（top_k 返回的索引互异，scatter 安全）
     q_full = jnp.full(34, v, jnp.float32).at[topa].set(q_top)
