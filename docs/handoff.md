@@ -104,6 +104,17 @@ PYTHONPATH=. python3 scripts/rl/benchmark_duplicate.py \
   落在噪声带内。详见 `docs/plan-0718.md` §4。
 - 详见 `docs/reports/jax-rl-0717.md` 附录。
 
+### eval2 调研 + C1（2026-07-19，结案）——详见 `docs/reports/eval2-alternatives-0719.md`
+
+- **代码考古**：eval2 不是启发式，是手牌效率子问题的**精确 2 步随机 DP**
+  （`legacy.py`：eval_naive 精确组合分解 → 两层 draw 期望）。「无法超越」
+  是因为一直用带噪近似打精确解的主场；立直系 AI（Suphx/LuckyJ/NAGA）无手工
+  eval 是因为立直计分让手工评估组合不可行，不是手工函数弱。
+- **C1（更深 DP，1000-pair 功率充分重审）**：depth-2 vs depth-1 = +1.2%
+  [−1.0,+3.4] 不显著；同池 BeliefExp ≈ depth-2 档、均远低于 Hybrid。
+  **eval2 家族深度饱和，替代方向全灭**；当年 80 局否决在充分功率下成立。
+- 剩余强度路线只有 C5（规则/meta 修复：副露判负、报听收益接入）。
+
 ### π' 部署（S1）+ NN 叶 A/B（2026-07-19，双证伪）——详见 `docs/reports/gumbel-deploy-0719.md`
 
 - **NN 叶 A/B**：同 V3 骨架只换叶，JAXG 叶 ≤ eval0 叶（×100 平；×300 **−4.6%
