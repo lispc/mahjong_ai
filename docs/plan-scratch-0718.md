@@ -86,4 +86,33 @@ M3 不打包票（纯 NN 在本项目从未达到搜索层强度）。
 - 门：arena pool 400 胜率 ≥ Baseline（eval2 系首次被无 eval2 模型追平）。
 - 部署评测 token 已备：`autohu:LABEL:PATH`（benchmark_pool，AutoHuPPOAgent）。
 
-{{SCRATCH_RESULT}}
+### M2（2026-07-19 下午，**失败——不迁移到 eval2 对手世界**）
+
+- 训练完成：380 iters / 49.8M decisions / 13.9h（987 dec/s）。in-env 曲线健康：
+  vs greedy cur_win 37.9% → 50.8%（反超三家合计，win_diff +0.08）。
+- **arena pool 400**（autohu 部署形态，vs Baseline/BeliefExp/Hybrid-JAXG2）：
+  **胜率 2.5%、点炮 30.2%**（Baseline 26.0%）——M2 门 FAIL。
+- 分解诊断（各 400 局）：vs 3×Baseline **4.8%**（点炮 24.2%）、
+  vs 3×BeliefExp **4.8%**（点炮 27.8%）——不是 pool hostile 假象。
+- **根因（按贡献排序）**：
+  1. **训练分布不含 eval2 系对手**：自对弈全是 NN 风格（+greedy 牌效启发式），
+     防守是针对 NN 式进攻学的；eval2 系的报听压迫/弃牌分布从未见过——
+     点炮率从 in-env ~11-16% 爆到 arena 24-30%。
+  2. **特征 OOD**：训练环 `no_tenpai` 强制 → 报听 flag 恒 0；arena 里 BeliefExp
+     报听后 flag=1，网络从未见过该输入模式。
+  3. 规则语义差（JAX 七对子胡、arena `is_succ` 不含；较小）。
+- 结论修正：冷启动学习**在自对弈分布内完全成功**（M1 成立），但
+  「in-env 强度 ≠ arena 强度」第二次实证（第一次：plan-0718 任务 B）。
+  部署分布必须进训练分布——这是 from-scratch 管线要补的下一课。
+
+### 后续可选（M2'：修分布再战，成本半天工程 + ~10h 训练）
+
+1. 训练环允许对手报听（greedy 恒 yes + NN 对手继承 tenpai 决策）→ 特征覆盖
+   flag=1 状态；
+2. 保持/加强对手多样性（多代 NN + greedy）；
+3. 从 iter380 续训 30-50M，arena 复测。
+风险：差距 4.8%→26% 很大，eval2 风格差距不只在 tenpai flag；更强的修补需要
+eval2 系对手进环（JAX 移植 eval2，工程贵）。建议：若做，只做这一次便宜迭代，
+不追加。
+
+{{M2_PRIME_RESULT}}

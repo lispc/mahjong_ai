@@ -104,6 +104,17 @@ PYTHONPATH=. python3 scripts/rl/benchmark_duplicate.py \
   落在噪声带内。详见 `docs/plan-0718.md` §4。
 - 详见 `docs/reports/jax-rl-0717.md` 附录。
 
+### From-scratch 优雅管线（plan-scratch-0718，2026-07-19，M1 过 / M2 败）
+
+- **M1（通过）**：随机初始化 + gumbel 搜索目标 + NPG 移动锚 + draw −0.25，
+  12M 决策从零学会牌效+防守（流局率 97.9%→1.8%，vs shanten-greedy 37.9%）。
+  冷启动可行性论证（精确声明/自摸真值从第一步免费）成立。
+- **M2（失败）**：50M 续训后 in-env vs greedy 50.8%，但 arena pool 400 仅
+  **2.5% 胜率 / 30.2% 点炮**（vs 3×Baseline/3×BeliefExp 各 4.8%）。
+  根因：训练分布不含 eval2 系对手 + 报听特征 OOD（训练恒否、arena 报听常见）。
+  **in-env 强度 ≠ arena 强度**第二次实证。M2'（修分布再战）列为可选，见
+  `docs/plan-scratch-0718.md` §5。
+
 ### 方向 0/2（god-mode 上界 + PTIE critic，2026-07-17 下午，双关闭）
 
 - **方向 0**：完美隐藏手牌信息（精确剩余分布 + 精确点炮规避）在 BeliefExp 结构内
