@@ -15,6 +15,7 @@
     | exactdef:<label>:<model_path>
     | beend:<label>[:<wait_model_path>]
     | bewait:<label>[:<wait_model_path>]
+    | gumbel:<label>:<model_path>[:<k>:<draws>]
 
 环境变量：
     DEALIN_BETA          defensive/oppdef/waitdef/exactdef/hybridfilter 点炮惩罚系数（默认 2.0）
@@ -251,6 +252,15 @@ class AgentFactory:
             return HybridNNBeliefAgent(f'HybridHeur-{self.label}', nn_model_path=model_path,
                                        belief_kind=belief_kind, device='cpu',
                                        temperature=0.0, nn_agent_class=HeuristicResponsePPOAgent)
+        if self.kind == 'gumbel':
+            from algo.agents.gumbel_search_agent import GumbelSearchAgent
+            # path 格式：model_path[:k:draws]（k/draws 可选，默认 8/2）
+            parts = self.path.split(':')
+            model_path = parts[0]
+            k = int(parts[1]) if len(parts) > 1 else None
+            draws = int(parts[2]) if len(parts) > 2 else None
+            return GumbelSearchAgent(f'Gumbel-{self.label}', model_path=model_path,
+                                     device='cpu', k=k, n_draws=draws)
         if self.kind == 'v3deep':
             # label = "depth-leaf[-candpolicy]"（如 "2-eval0" / "2-nn" / "2-nn-bc"）
             parts = self.label.split('-')
@@ -296,6 +306,7 @@ def _make_factory(token):
                          ('hybridfilter', 'HybridFilter-'), ('hybridend', 'HybridEnd-'),
                          ('hybridsilent', 'HybridSil-'),
                          ('hybridsafe', 'HybridSafe-'), ('hybridheur', 'HybridHeur-'),
+                         ('gumbel', 'Gumbel-'),
                          ('be-nn', 'BE-NN-')):
         if token.startswith(kind + ':'):
             if kind in ('oppdef', 'hybridopp', 'danger'):
@@ -312,6 +323,14 @@ def _make_factory(token):
                 _, label, path, thr = parts
                 return AgentFactory(kind, label=label,
                                     path=f'{path}:beliefexp:{thr}'), f'{prefix}{label}'
+            if kind == 'gumbel':
+                # gumbel:LABEL:MODEL_PATH[:K:DRAWS]（MODEL_PATH 不含冒号）
+                parts = token.split(':')
+                if len(parts) not in (3, 5):
+                    raise ValueError(f'gumbel token needs 3 or 5 parts: {token}')
+                label = parts[1]
+                path = ':'.join(parts[2:])
+                return AgentFactory(kind, label=label, path=path), f'{prefix}{label}'
             if kind in ('beend', 'bewait', 'besilent'):
                 parts = token.split(':', 2)
                 label = parts[1]

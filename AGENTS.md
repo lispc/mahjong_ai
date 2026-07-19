@@ -236,6 +236,7 @@ HybridNNBeliefAgent(
 - `hybridsilent:` = HybridNNBesilentAgent（Hybrid 接静默守卫搜索层）
 - `hybridt:LABEL:PATH:THRESHOLD` = HybridNNBeliefAgent 可配置 tenpai_threshold
 - `hybridfix:LABEL:PATH` = HybridNNBeliefTenpaiFixAgent（修复 _is_critical 的 tenpai_players 死代码；评测证实几乎无差，不晋升）
+- `gumbel:LABEL:PATH[:K:DRAWS]` = GumbelSearchAgent（π' 每步轻搜索部署，2026-07-19 **已证伪**：arena 0.5%，根因见 `docs/reports/gumbel-deploy-0719.md`；agent 可用但勿作强度方向）
 
 ### 5.2 数据文件
 
@@ -366,6 +367,9 @@ PYTHONPATH=. python3 scripts/rl/train_wait_dist.py \
 12. **HybridNNBeliefAgent._is_critical 的 tenpai 分支是死代码（2026-07-17 确认几乎无害）**：误用 `getattr(ctx,'tenpai',set())`（ContextV3 实为 `tenpai_players`），「对手报听→搜索」从未触发，只有弃牌数阈值生效。修复变体 `hybridfix` 1000-pair 仅 +0.1%（报听几乎都发生在 ≥28 弃牌后），**不改原类**；若未来报听提前（如引擎接入报听收益）需重估。
 13. **Hybrid 的 melds 列表 quirk**：Hybrid 把同一 melds 列表共享给 nn_agent/belief_agent，`add_meld` 被三个组件各调一次 → 每个副露在列表中出现 3 次（`full_hand()` 巧合得到正确 3 张；gang 少 1 张）。写快照/状态注入代码时必须按此生产表示复刻（见 `scripts/rl/peng_paired_eval.py::_inject`）。
 14. **RL/自对弈 bootstrap 判死（2026-07-17，15 候选零晋升）**：outcome 级 RL（AWBC/AWR）与配对因果标签 RL 均无法改进当前 best；根因=信用分配 SNR + 选择偏差混杂 + 误差状态在 175 维特征上不可分 + 在位者近最优。特征扩容路径同日判死（belief 特征坏碰可分性 AUC 0.638 < 0.75，`scripts/rl/belief_feature_probe.py`）。详见 `docs/reports/selfplay-bootstrap-0717.md`。复用资产：`output/peng_eval_v1.npz`（12k 配对 Δ）、`output/bootstrap_v{1,2}_merged.npz`、`scripts/rl/selfplay_bootstrap.py`、`scripts/rl/peng_paired_eval.py`。
+15. **belief/采样类 agent 的 arena accounting 规则（2026-07-19，两次 pool 崩溃换来）**：被碰/杠/胡的牌**不广播 'put'**（`driver/engine.py:331`），整组副露物理牌对 context 不可见，belief 采样前必须用 'meld' 消息自行跟踪剔除（碰 3/杠 4）；自己打出的牌被 claim 时 `used` 不撤回，需手动撤回；对手闭手数 = 13 − 3×副露数。详见 `docs/reports/gumbel-deploy-0719.md` §3。
+16. **arena 与 jaxenv 和牌判定不一致（既有 quirk）**：arena `algo.is_succ` 对有副露的手牌永远判负（`full_hand()` 副露只记 1 张）且七对子不算胡；jaxenv `rules.is_win_counts` 两者都支持。影响所有 agent 与跨环境对比。
+17. **π' 搜索直接部署证伪 + dealin 头已死（2026-07-19）**：JAX 系训练从未监督 dealin 头，trunk 漂移使其 arena 输出恒 ≈0.31 无区分度；「NN 叶 ≤ eval2 叶」有 arena 直接证据（×300 −4.6% 显著）。任何「NN 叶替换 eval2」或「无防守条件的轻搜索」方向勿再开。
 
 ---
 
