@@ -104,6 +104,44 @@ PYTHONPATH=. python3 scripts/rl/benchmark_duplicate.py \
   落在噪声带内。详见 `docs/plan-0718.md` §4。
 - 详见 `docs/reports/jax-rl-0717.md` 附录。
 
+### π' 部署（S1）+ NN 叶 A/B（2026-07-19，双证伪）——详见 `docs/reports/gumbel-deploy-0719.md`
+
+- **NN 叶 A/B**：同 V3 骨架只换叶，JAXG 叶 ≤ eval0 叶（×100 平；×300 **−4.6%
+  [−7.4,−1.8]** 显著）。「搜索强度=叶值质量」铁律在 JAXG 上依然成立；
+  **S4（eval2-free Hybrid）判死**，「NN 叶换 eval2」变体勿再开。
+- **S1（GumbelSearchAgent，π' 每步部署）**：pool 400 仅 **0.5%**（纯 prior 对照
+  7.2–14.7%）。消融：β=0→8→32 单调恶化；4× 采样更差（偏差非方差）；β=−32 为 0
+  （Q 非倒置）。根因=防守通道部署不可用：真实手牌胡牌掩码缺失（均匀 belief
+  胡概率恒 0）+ **dealin 头因 JAX 训练从未监督、trunk 漂移已死（输出恒 ≈0.31）**，
+  Q 退化为纯进攻 1-ply 重排，覆盖 prior 蒸馏好的防守 → 点炮 27%。
+  **「NN+每步轻搜索」象限证伪；Hybrid 仍是强度/简洁最优折中。**
+- 复用资产：`algo/agents/gumbel_search_agent.py`（accounting 已修，可作 belief
+  类 agent 模板）+ `gumbel:` token；平台 accounting 五条规则（被 claim 牌不广播
+  'put' 等）见报告 §3 / AGENTS.md §7.15–7.17。
+
+### arena `is_succ` quirk 量化（2026-07-19）
+
+- 120 局 / 27,962 次和牌判定：**漏判 64 起（0.229%），全部为有副露手牌物理成和
+  判负**（47 铳和 + 17 自摸）；七对子 0 起（无 agent 追七对，该 quirk 无害）。
+- 副露判负 quirk **不可忽略**（meld-heavy 对局 ~每 2 局 1 起），是 arena
+  「无人敢碰」元游戏的规则级成因；NN response 头在 jaxenv（副露可胡）训练，
+  arena 判负 = 系统性惩罚 NN 的碰/杠。修复引擎裁决可对齐训练环与真实规则，
+  但改变所有历史 benchmark 可比性——**待用户拍板**（探针：`tmp/is_succ_quirk_probe.py`）。
+
+### Gumbel gen3（2026-07-19，**不晋升**——固定锚 AZ 迭代到头）
+
+- gen1 配方复刻：固定 KL 锚 0.2，init=`jax_gumbel_pilot/iter92.msgpack`，
+  k=8/D=2/β=32，184 iters = **24.1M decisions / 6.3h**（gen1 的 2 倍算力），seed 20。
+- 训练健康（agree 0.61、KL 0.09 锚定、流局 <1%）；in-env 末段温和正
+  （final 1v3 每席位 +1.4pp / 3v1 +0.7pp）——再次印证 in-env 不可作裁决依据。
+- **arena 筛查（1000-pair duplicate vs iter92 best）：−2.4% [−5.0,+0.2]**，
+  中心负侧 → 按协议不晋升、不进 5000-pair。
+  pkl：`output/duplicate_g3_vs_jaxg_1000.pkl`；权重 `output/jax_gumbel_gen3_iter184.pt`（保留）。
+- **结论**：1b 的 +2.0% 是「换目标形态」（outcome→搜索蒸馏）的一次性收益，
+  不是可重复的迭代杠杆；固定锚 AZ 自迭代在 gen1 即达定点。gen2（移动锚 −2.9%）
+  与 gen3（固定锚 2× 算力 −2.4% 噪声）共同判死 AZ 迭代路线。
+  强度路线的剩余选项见 `docs/reports/gumbel-deploy-0719.md` 与本文件 §4 各判词。
+
 ### From-scratch 优雅管线（plan-scratch-0718，2026-07-19，M1 过 / M2 败）
 
 - **M1（通过）**：随机初始化 + gumbel 搜索目标 + NPG 移动锚 + draw −0.25，
@@ -208,6 +246,7 @@ defensive head（standalone 弱，val MSE 0.054 但 100 局仅 11% win）。
 | `docs/reports/rl-ppo-report.md` | PPO 端到端 RL 实验报告 |
 | `docs/reports/ablation_report.md` | Hybrid-FullAction 减法消融 |
 | `docs/reports/future_directions_analysis.md` | 未来方向分析 |
+| `docs/reports/gumbel-deploy-0719.md` | π' 部署（S1）+ NN 叶 A/B 双证伪；平台 accounting 规则 |
 | `docs/expectimax-todos.md` | ExpectiMax 相关 TODO |
 | `docs/rules.md` | 晋北麻将规则 |
 | `AGENTS.md` | Agent 工作守则与项目约定 |
