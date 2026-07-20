@@ -12,7 +12,8 @@ from algo.agents.ppo_agent import PPOAgent
 
 class AutoHuPPOAgent(PPOAgent):
     def respond_hu(self, tile_val, context=None):
-        return algo.is_succ(self.full_hand() + [tile_val])
+        from algo.eval.v2 import is_win_with_melds
+        return is_win_with_melds(list(self.cur) + [tile_val], len(self.melds))
 
     def declare_tenpai(self, hand, context):
         return False

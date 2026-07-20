@@ -1,5 +1,6 @@
 import algo
 import tile
+from algo.eval.v2 import is_win_with_melds
 
 
 class Message:
@@ -38,7 +39,9 @@ class Agent:
 
     def add(self, t):
         self.cur.append(t)
-        ok = algo.is_succ(self.full_hand())
+        # 物理和牌判定：副露每组计一个已完成面子，无副露允许七对子
+        # （2026-07-19 修复：此前 is_succ(full_hand()) 因副露只记 1 张而永远判负）
+        ok = is_win_with_melds(self.cur, len(self.melds))
         if self.verbose:
             print('摸牌:' + tile.tile_to_str(t))
         #if ok:
@@ -62,8 +65,9 @@ class Agent:
 
     # ---- 碰/杠/和响应接口（完整动作空间） ----
     def respond_hu(self, tile_val, context=None):
-        """有人打出 tile_val，是否胡牌。基类用手牌判断。"""
-        return algo.is_succ(self.full_hand() + [tile_val])
+        """有人打出 tile_val，是否胡牌。基类用手牌判断（物理和牌：副露计面子、
+        无副露允许七对子）。"""
+        return is_win_with_melds(list(self.cur) + [tile_val], len(self.melds))
 
     def _can_peng(self, tile_val):
         return sum(1 for t in self.cur if t == tile_val) >= 2

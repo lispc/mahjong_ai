@@ -147,6 +147,12 @@ class AgentFactory:
             return HybridNNBeliefTenpaiFixAgent(
                 f'HybridFix-{self.label}', nn_model_path=self.path,
                 belief_kind='beliefexp', device='cpu', temperature=0.0)
+        if self.kind == 'hybridnm':
+            from algo.agents.hybrid_nn_belief_nomeld_agent import \
+                HybridNNBeliefNoMeldAgent
+            return HybridNNBeliefNoMeldAgent(
+                f'HybridNM-{self.label}', nn_model_path=self.path,
+                belief_kind='beliefexp', device='cpu', temperature=0.0)
         if self.kind == 'hybridopp':
             from algo.agents.hybrid_nn_belief_opp_agent import HybridNNBeliefOppAgent
             # path 格式：model_path:opp_model_path（opp 默认 output/opponent_model.pt）
@@ -301,7 +307,7 @@ def _make_factory(token):
                          ('beend', 'BEEnd-'), ('bewait', 'BEWait-'),
                          ('besilent', 'BESilent-'),
                          ('danger', 'Danger-'), ('hybrid', 'Hybrid-'),
-                         ('hybridt', 'HybridT-'), ('hybridfix', 'HybridFix-'),
+                         ('hybridt', 'HybridT-'), ('hybridfix', 'HybridFix-'), ('hybridnm', 'HybridNM-'),
                          ('hybridopp', 'HybridOpp-'), ('hybridwait', 'HybridWait-'),
                          ('hybridfilter', 'HybridFilter-'), ('hybridend', 'HybridEnd-'),
                          ('hybridsilent', 'HybridSil-'),

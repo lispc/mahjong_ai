@@ -283,6 +283,22 @@ def _shanten_fast_general(hand):
     return _shanten_fast_state(tuple(sorted(counts.items())), 0)
 
 
+def is_win_with_melds(tiles, n_melds):
+    """物理和牌判定（支持副露与七对子）。
+
+    tiles: 闭手牌（可含胡的那一张）；n_melds: 副露组数（碰/杠各计 1 组，
+    每组视为一个已完成的面子）。闭手需拆成 (4 - n_melds) 个面子 + 1 对将；
+    无副露时额外允许七对子。
+    """
+    if n_melds < 0 or n_melds > 4:
+        return False
+    if n_melds == 0 and len(tiles) == 14 and _is_seven_pairs(tiles):
+        return True
+    if len(tiles) != 3 * (4 - n_melds) + 2:
+        return False
+    return _can_split(list(tiles))
+
+
 # ---------------------------------------------------------------------------
 # 搭子质量
 # ---------------------------------------------------------------------------

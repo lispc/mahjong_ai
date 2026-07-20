@@ -602,7 +602,7 @@ def test_distribution(n_games=500, seed=14):
     draw_ok = abs(jd - pd) <= 0.02
     print(f'  局长差 {100 * (jl - pl) / max(pl, 1e-9):+.2f}% (容差 ±5%), '
           f'流局率差 {100 * (jd - pd):+.2f}pp (容差 ±2pp)')
-    # 注意：JAX 胡牌含七对子（v2 语义），Python 引擎 is_succ 不含；随机打法下差异 << 容差
+    # 注意：JAX 胡牌含七对子（v2 语义）；Python 引擎自 2026-07-19 起同语义（is_win_with_melds）
     assert len_ok, '平均局长差异超容差'
     assert draw_ok, '流局率差异超容差'
     print('[distribution] passed')

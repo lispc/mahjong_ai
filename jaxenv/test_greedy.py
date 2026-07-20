@@ -67,8 +67,9 @@ def jax_greedy_games(n, seed):
 class _GreedyAgent:
     """Python 引擎侧镜像：最小 shanten 贪心（与 jaxenv/greedy.py 同 tie-break）。
 
-    【胡牌语义对齐】基类 Agent.add/respond_hu 用 algo.is_succ 判胡（不含七对子），
-    而 jaxenv env 实现的是 v2 语义（含七对子，见 env.py 头注第 6 条）；greedy 会
+    【胡牌语义对齐】基类 Agent.add/respond_hu 自 2026-07-19 起用
+    is_win_with_melds 判胡（含副露与七对子），与 jaxenv env 的 v2 语义一致；
+    （历史：此前用 algo.is_succ，不含七对子/副露和）；greedy 会
     主动追七对子，语义差会系统性抬高 PY 侧流局率（实测 ~11.5% 的 JAX 局为七对
     子胡牌）。此处把 add/respond_hu 改用 algo.eval.v2.is_win，使两侧规则一致
     （greedy 从不副露，v2.is_win 的 14 张判定在此是精确语义）。

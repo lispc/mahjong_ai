@@ -160,17 +160,23 @@ tail -f output/compute_mc_values_pypy_5000_part0.log
 
 ## 4. 当前最强配置
 
-```python
-from algo.agents.hybrid_nn_belief_agent import HybridNNBeliefAgent
+> **⚠️ 2026-07-19 规则断代**：arena 修复副露和牌判负 + 七对子判负后，
+> 断代前所有 benchmark/晋升证据不可直接比较（含本节历史数字，保留存档）。
+> 断代后重锚结论（duplicate，详见 `docs/eval-protocol.md` §2.1 断代条款）：
+>
+> **当前 best = `baseline`（纯 eval2 贪心，无 NN、无搜索）**
+> - Baseline vs BeliefExp 5000p：**+2.5% [+1.5,+3.4]**
+> - Baseline vs hybridnm:NM:jax_gumbel_iter92 5000p：**+2.1% [+0.9,+3.4]**
+> - hybridnm(jax_gumbel_iter92) vs hybridnm(nn_full_action_best) 1000p：**−2.8%**
+>   → 最强 NN 权重 = `output/nn_full_action_best.pt`（以 `hybridnm` 形态部署）
+> - 旧 Hybrid（可碰杠形态）在真规则下死刑（vs NM −18.4%）：NN response 头碰牌 +
+>   搜索层对压缩副露表示误判 = 僵尸 meta artifact
+>
+> 断代前最强配置（存档）：`HybridNNBeliefAgent('Hybrid-FullAction-Gumbel92',
+> nn_model_path='output/jax_gumbel_iter92.pt', belief_kind='beliefexp',
+> tenpai_threshold=28, device='cpu')` —— 断代后**勿用**（用 `hybridnm` 变体替代）。
 
-HybridNNBeliefAgent(
-    'Hybrid-FullAction-Gumbel92',
-    nn_model_path='output/jax_gumbel_iter92.pt',
-    belief_kind='beliefexp',
-    tenpai_threshold=28,
-    device='cpu',
-)
-```
+<details><summary>断代前历史（存档，数字不可与断代后比较）</summary>
 
 对应模型（PyTorch `.pt`）：
 - `output/jax_gumbel_iter92.pt` + `output/jax_gumbel_iter92_config.json`
@@ -197,6 +203,8 @@ HybridNNBeliefAgent(
 128k 行为克隆与 DPO/PPO/KTO 等后续实验均**未稳定超越**当前 SoupDistilled best；第二轮 soup/蒸馏 bootstrap 也已边际递减。详见 `docs/handoff.md §6.10–§6.14`。
 
 > **2026-07-16 重要更正**：此前（07-06）记录的「duplicate 考场中 Baseline 显著强于当前 best（paired −20.2%）」是 **benchmark 脚本配对统计 bug**（候选与对手同名时前缀匹配误计），并非事实。用席位识别重算全部历史 pkl 后结论反转：**Hybrid-Best 在 duplicate 下显著强于 Baseline（+9.4%，5000 pairs）与 BeliefExp（+10.4%）**。但 soup→蒸馏这最后一环被证伪：NewBest vs OldBest 5000 pairs 仅 +0.2% [−0.5,+0.9]，score-proxy 亦为零——属 winner's curse，两模型视为同强。详见 `docs/reports/duplicate-reanalysis-0716.md`。**晋升/放弃决策一律按 `docs/eval-protocol.md`**：5000-pair duplicate arena、paired win diff CI 不含 0、独立种子复跑；Elo 不作依据。
+
+</details>
 
 ---
 
@@ -237,6 +245,7 @@ HybridNNBeliefAgent(
 - `hybridt:LABEL:PATH:THRESHOLD` = HybridNNBeliefAgent 可配置 tenpai_threshold
 - `hybridfix:LABEL:PATH` = HybridNNBeliefTenpaiFixAgent（修复 _is_critical 的 tenpai_players 死代码；评测证实几乎无差，不晋升）
 - `gumbel:LABEL:PATH[:K:DRAWS]` = GumbelSearchAgent（π' 每步轻搜索部署，2026-07-19 **已证伪**：arena 0.5%，根因见 `docs/reports/gumbel-deploy-0719.md`；agent 可用但勿作强度方向）
+- `hybridnm:LABEL:PATH` = HybridNNBeliefNoMeldAgent（禁碰杠 Hybrid；**规则修复后新 meta 的处方形态**——原 Hybrid 的 NN response 头碰牌后搜索层对副露手牌误判，arena 霸权为僵尸 meta artifact，见 `docs/handoff.md` C5 节）
 
 ### 5.2 数据文件
 
@@ -368,7 +377,7 @@ PYTHONPATH=. python3 scripts/rl/train_wait_dist.py \
 13. **Hybrid 的 melds 列表 quirk**：Hybrid 把同一 melds 列表共享给 nn_agent/belief_agent，`add_meld` 被三个组件各调一次 → 每个副露在列表中出现 3 次（`full_hand()` 巧合得到正确 3 张；gang 少 1 张）。写快照/状态注入代码时必须按此生产表示复刻（见 `scripts/rl/peng_paired_eval.py::_inject`）。
 14. **RL/自对弈 bootstrap 判死（2026-07-17，15 候选零晋升）**：outcome 级 RL（AWBC/AWR）与配对因果标签 RL 均无法改进当前 best；根因=信用分配 SNR + 选择偏差混杂 + 误差状态在 175 维特征上不可分 + 在位者近最优。特征扩容路径同日判死（belief 特征坏碰可分性 AUC 0.638 < 0.75，`scripts/rl/belief_feature_probe.py`）。详见 `docs/reports/selfplay-bootstrap-0717.md`。复用资产：`output/peng_eval_v1.npz`（12k 配对 Δ）、`output/bootstrap_v{1,2}_merged.npz`、`scripts/rl/selfplay_bootstrap.py`、`scripts/rl/peng_paired_eval.py`。
 15. **belief/采样类 agent 的 arena accounting 规则（2026-07-19，两次 pool 崩溃换来）**：被碰/杠/胡的牌**不广播 'put'**（`driver/engine.py:331`），整组副露物理牌对 context 不可见，belief 采样前必须用 'meld' 消息自行跟踪剔除（碰 3/杠 4）；自己打出的牌被 claim 时 `used` 不撤回，需手动撤回；对手闭手数 = 13 − 3×副露数。详见 `docs/reports/gumbel-deploy-0719.md` §3。
-16. **arena 与 jaxenv 和牌判定不一致（既有 quirk）**：arena `algo.is_succ` 对有副露的手牌永远判负（`full_hand()` 副露只记 1 张）且七对子不算胡；jaxenv `rules.is_win_counts` 两者都支持。影响所有 agent 与跨环境对比。
+16. ~~**arena 与 jaxenv 和牌判定不一致**~~（**2026-07-19 已修**）：`Agent.add`/`respond_hu` 改用 `algo.eval.v2.is_win_with_melds`（副露每组计一个已完成面子、无副露允许七对子），与 jaxenv/真实规则对齐；`algo.is_succ` 本身未动（legacy 测试依赖）。**规则断代**：此前所有 benchmark（含晋升链）在旧 meta（副露判负、无七对）下产生，跨断代数字不可直接比较。
 17. **π' 搜索直接部署证伪 + dealin 头已死（2026-07-19）**：JAX 系训练从未监督 dealin 头，trunk 漂移使其 arena 输出恒 ≈0.31 无区分度；「NN 叶 ≤ eval2 叶」有 arena 直接证据（×300 −4.6% 显著）。任何「NN 叶替换 eval2」或「无防守条件的轻搜索」方向勿再开。
 
 ---

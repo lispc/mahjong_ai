@@ -130,14 +130,45 @@ PYTHONPATH=. python3 scripts/rl/benchmark_duplicate.py \
   类 agent 模板）+ `gumbel:` token；平台 accounting 五条规则（被 claim 牌不广播
   'put' 等）见报告 §3 / AGENTS.md §7.15–7.17。
 
-### arena `is_succ` quirk 量化（2026-07-19）
+### arena `is_succ` quirk 量化与修复（2026-07-19，**已修**）
 
-- 120 局 / 27,962 次和牌判定：**漏判 64 起（0.229%），全部为有副露手牌物理成和
-  判负**（47 铳和 + 17 自摸）；七对子 0 起（无 agent 追七对，该 quirk 无害）。
-- 副露判负 quirk **不可忽略**（meld-heavy 对局 ~每 2 局 1 起），是 arena
-  「无人敢碰」元游戏的规则级成因；NN response 头在 jaxenv（副露可胡）训练，
-  arena 判负 = 系统性惩罚 NN 的碰/杠。修复引擎裁决可对齐训练环与真实规则，
-  但改变所有历史 benchmark 可比性——**待用户拍板**（探针：`tmp/is_succ_quirk_probe.py`）。
+- 量化：120 局 / 27,962 次和牌判定：漏判 64 起（0.229%），全部为有副露手牌
+  物理成和判负；七对子 0 起。副露判负是 arena「无人敢碰」元游戏的规则级成因。
+- **修复（C5）**：`Agent.add`/`respond_hu`/`AutoHuPPOAgent`/`GumbelSearchAgent`
+  改用 `algo.eval.v2.is_win_with_melds`（副露计面子 + 七对），与 jaxenv/真实
+  规则（`docs/rules.md`「四个组合加一对将」）对齐。验证：单测 6/6、全测试套件绿、
+  探针漏判归零（`tmp/is_succ_quirk_probe.py`）。
+- **规则断代**：修复后所有 benchmark 与修复前不可直接比较（meta 偏移）；
+  修复后首批数字见 `output/pool400_rules_fix.log`。报听收益未接入
+  （`docs/rules.md` 的报听机制只有锁手，无计分收益——C5 的「报听接入」一项
+  无规则依据，不做）。
+
+### C5 meta 翻转与 HybridNM 处方（2026-07-19，断代重锚）
+
+- **meta 翻转（pool 400 同座位前后）**：BeliefExp 27.3→**35.0**、Baseline
+  26.5→**34.5**、Gumbel 0.5→15.2、**Hybrid-JAXG 43.8→10.8**。
+- **机制**（64 局 record_log）：Hybrid 的 NN response 头（jaxenv 副露可胡环境
+  训练）碰/杠 0.97 次/局，但 BeliefExp 搜索层用 `full_hand()`（副露只记 1 张）
+  评估副露手牌 → 副露局 0 胜、点炮 26.8%。旧 meta 这些是僵尸局无成本（且
+  僵尸对手是残局养料）——**arena 霸权有相当成分是僵尸 meta artifact**。
+- **处方**：`hybridnm`（禁碰杠 Hybrid，`algo/agents/hybrid_nn_belief_nomeld_agent.py`）
+  pool 29.8%/点炮 12.2%（全场最佳防守）。token：`hybridnm:LABEL:PATH`。
+- **重锚（终局判决，duplicate）**：
+  | 对局 | pairs | paired diff | 判定 |
+  |---|---|---|---|
+  | Baseline vs BeliefExp | 5000 | **+2.5% [+1.5,+3.4]** | Baseline 显著 |
+  | Baseline vs NM(jaxg) | 5000 | **+2.1% [+0.9,+3.4]** | Baseline 显著（1000p +3.3% 符号一致）|
+  | NM(jaxg) vs NM(old best) | 1000 | **−2.8% [−5.4,−0.2]** | **1b AZ 晋升反转**，old soup 更强 |
+  | NM vs 旧 Hybrid | 1000 | +18.4% [+16.0,+20.8] | 旧形态死刑 |
+  | NM vs BeliefExp / Baseline | 1000 | −1.7% / −3.3% | 见上两行 5000p 终裁 |
+- **新强度序（真规则，断代后）**：**Baseline > BeliefExp > NM(old best) >
+  NM(jaxg) ≫ Hybrid（旧形态）**。**新 anchor = baseline**（纯 eval2 贪心）；
+  最强 NN 权重 = `output/nn_full_action_best.pt`（`hybridnm` 形态部署）；
+  三件套 `hybrid:Base` → `hybridnm:Base`（eval-protocol §2.1 已更新）。
+- **项目叙事级教训**：1b AZ 闭环的 +2.0% 晋升（11000 pairs）产生在僵尸 meta，
+  真规则下反转——断代前所有晋升证据（含 NN 谱系内部排序）都需以 NM 形态重测
+  才可信；jaxenv 训练环规则本就正确（副露可胡），错的是 arena 裁判与
+  Hybrid 的搜索层副露表示。
 
 ### Gumbel gen3（2026-07-19，**不晋升**——固定锚 AZ 迭代到头）
 

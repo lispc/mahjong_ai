@@ -38,10 +38,24 @@
 ### 2.1 Duplicate arena（主考场）
 
 ```
-对手三件套（固定）：baseline, beliefexp, hybrid:Base:<anchor_model>
+对手三件套（固定）：baseline, beliefexp, hybridnm:Base:<anchor_nn>
 候选席位：position 0 镜像（默认 2 局/seed）
-anchor_model：做决策时的当前 best（当前为 output/jax_gumbel_iter92.pt）
+anchor_nn：做决策时的当前最强 NN 权重（2026-07-19 断代后为
+  output/nn_full_action_best.pt；见下方断代条款）
+anchor（当前 best）：baseline（纯 eval2 贪心，见下）
 ```
+
+> **2026-07-19 规则断代条款**：arena 修复副露和牌判负 + 七对子判负
+> （`is_win_with_melds`）。断代前的所有 benchmark 与断代后**不可直接比较**。
+> 断代后重锚（duplicate，对手三件套）：
+> - Baseline vs BeliefExp 5000p：**+2.5% [+1.5,+3.4]**（显著）
+> - Baseline vs hybridnm:NM:jax_gumbel_iter92 5000p：**+2.1% [+0.9,+3.4]**
+>   （显著，与 1000p +3.3% 符号一致）
+> - hybridnm:NM:jax_gumbel_iter92 vs hybridnm:Old:nn_full_action_best 1000p：
+>   **−2.8% [−5.4,−0.2]**（1b AZ 晋升在真规则下反转，旧 soup 权重更强）
+> - hybridnm vs 旧 hybrid（可碰杠）1000p：+18.4%（旧形态死刑）
+> → **新 anchor（当前 best）= baseline**；最强 NN 权重 = `nn_full_action_best.pt`
+> （NM 形态部署）；三件套中 `hybrid:Base` 替换为 `hybridnm:Base`。
 
 命令：
 

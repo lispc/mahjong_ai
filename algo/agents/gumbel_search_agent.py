@@ -12,14 +12,14 @@
    a. 声明概率：从「不可见牌」（ctx.remaining_wall(full_hand)，= 牌山 + 对手手牌的
       多重集合）采 S 个世界，每个世界按各对手闭手数量（13 − 3×副露数）分配手牌。
       对每个对手 off∈{1,2,3}、每个世界做可行性硬掩码（hu ⇔ 样本手牌 + [a] 满足
-      arena 和牌判定 algo.is_succ；peng ⇔ ≥2 张 a；gang ⇔ ≥3 张；报听锁手玩家
+      物理和牌判定 is_win_with_melds（含副露/七对）；peng ⇔ ≥2 张 a；gang ⇔ ≥3 张；报听锁手玩家
       不能碰/杠）。可行则构造该对手视角 obs 过 response head（4 logits
       [pass,peng,gang,hu]），P(claim X) = sigmoid(logit_X − logit_pass)，
       对 S 个世界取平均（不可行世界计 0），得 9 个声明位（胡 off1..3 → 杠
       off1..3 → 碰 off1..3）的 p_claim[9]。
    b. 7 个分支后状态（杠 off1..3 / 碰 off1..3 / 全pass）各自「跳到 root 下次
       摸牌后」截断：从不可见牌无放回采 n_draws 张（每个分支独立采），
-      root 手牌' = 闭手 − a + 摸到的牌（+副露牌），若自摸（arena is_succ）
+      root 手牌' = 闭手 − a + 摸到的牌（+副露牌），若自摸（is_win_with_melds）
       该样本值 +1.0，否则过网络取 value head；均值即 jumpv[branch]。
       杠分支若牌山耗尽（世界分配后无余牌）→ dead → 价值 0。
    c. Q walk（同 search.py._walk_q）：val9 = [-1/3,-1/3,-1/3, jumpv[0..5]]，
@@ -37,17 +37,16 @@
 - 全 pass 分支的 value obs 用 see_tile(a, root) 后的 context 副本（对应 jaxenv
   _branch_states 的 discards[d]+=a）；碰/杠分支不用（jaxenv 中 a 进入对手副露，
   不进弃牌堆；ContextV3 本就不记副露，天然一致）。
-- 和牌/自摸判定一律用 arena 语义 algo.is_succ（4 面子+1 对；有副露后因为
-  full_hand 副露只记 1 张而永远判负——这是平台规则 quirk，搜索照实镜像）。
+- 和牌/自摸判定用物理和牌 `is_win_with_melds`（2026-07-19 起 arena 已支持
+  副露和与七对子，与引擎实际判定一致）。
 
 部署近似（vs 训练环真实状态）：
 1. 隐藏信息用 S 个均匀 belief 世界代替真实手牌/牌山；世界在 k 个候选间复用
    （paired worlds，降低候选间比较方差）。
 2. 对手副露牌（被碰/杠的牌不广播 'put'，对 context 不可见）通过引擎 'meld'
-   消息自行跟踪并从不可见牌池剔除（碰 3 张/杠 4 张）；有副露的对手按 arena
-   is_succ quirk 直接判不可胡（引擎实际语义）。
-3. 杠分支 dead 只检「牌山耗尽」；arena 规则下杠后补牌自摸不可能（副露 quirk），
-   与 search.py 的 dead 语义在 arena 下等价。
+   消息自行跟踪并从不可见牌池剔除（碰 3 张/杠 4 张）。
+3. 杠分支 dead 只检「牌山耗尽」（杠后补牌自摸概率忽略），
+   与 search.py 的 dead 语义近似。
 
 环境变量：MJ_GUMBEL_K(8)、MJ_GUMBEL_DRAWS(2)、MJ_GUMBEL_BETA(32.0)、
 MJ_GUMBEL_S(4)、MJ_GUMBEL_DEALIN(1)。构造参数优先于环境变量。
@@ -67,8 +66,8 @@ import time
 import numpy as np
 import torch
 
-import algo
 from algo.agents.ppo_agent import PPOAgent
+from algo.eval.v2 import is_win_with_melds
 from algo.nn.features import extract_features, _TILE_TO_IDX, _IDX_TO_TILE
 
 NUM_ACTIONS = 34
@@ -299,8 +298,8 @@ class GumbelSearchAgent(PPOAgent):
         # 1 张，故每组副露（无论碰/杠）闭手净减 3：13 − 3×副露数
         sizes = [13 - 3 * len(entries) for _, entries, _ in opponents]
         worlds = [self._deal(m_list, sizes) for _ in range(self.n_worlds)]
-        # 杠分支 dead：世界分配后「牌山」耗尽（arena 规则下杠后补牌自摸不可能——
-        # 副露 quirk 使 is_succ 恒 False，与 search.py 的 dead 语义等价）
+        # 杠分支 dead：世界分配后「牌山」耗尽（杠补自摸概率忽略，与 search.py
+        # dead 语义近似）
         wall_empty = len(m_list) - sum(sizes) <= 0
 
         # 3a) response obs 行（仅可行声明；ctx 不 see_tile，与 CLAIM 训练语义一致）
@@ -314,9 +313,8 @@ class GumbelSearchAgent(PPOAgent):
                     for s in range(self.n_worlds):
                         closed = worlds[s][off - 1]
                         cnt_a = closed.count(a)
-                        # arena is_succ quirk：有副露的手牌永远判负（副露只记 1 张），
-                        # 镜像引擎实际判定：有副露 => hu_ok=False
-                        hu_ok = (not entries_c) and algo.is_succ(closed + [a])
+                        # 物理和牌判定（2026-07-19 起 arena 已支持副露和/七对）
+                        hu_ok = is_win_with_melds(closed + [a], len(entries_c))
                         gang_ok = cnt_a >= 3 and not locked_c
                         peng_ok = cnt_a >= 2 and not locked_c
                         if hu_ok or gang_ok or peng_ok:
@@ -352,7 +350,8 @@ class GumbelSearchAgent(PPOAgent):
                 draws = random.sample(m_list, nd) if nd > 0 else []
                 for r in draws:
                     handp = cur_minus_a + [r] + root_meld_tiles
-                    win = algo.is_succ(handp)
+                    # 自摸判定用闭手 + n_melds 的物理和牌（obs 特征仍用含副露标记的 handp）
+                    win = is_win_with_melds(cur_minus_a + [r], len(self.melds))
                     val_rows.append(self._extract(ctxb, handp, self.name))
                     val_meta.append((ia, branch, win))
 
