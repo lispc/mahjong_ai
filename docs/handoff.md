@@ -170,6 +170,29 @@ PYTHONPATH=. python3 scripts/rl/benchmark_duplicate.py \
   才可信；jaxenv 训练环规则本就正确（副露可胡），错的是 arena 裁判与
   Hybrid 的搜索层副露表示。
 
+### gen4（eval2 对手池 AZ）+ beliefjax 管线（2026-07-20，全部结案）
+
+- **移植基建（可复用）**：`jaxenv/eval2jax.py`（arena Baseline 完整移植，eval0
+  6000/6000 逐值 parity）、`jaxenv/beliefjax.py`（BeliefExpectimaxAgent 移植，
+  2186 快照 top-1 98.03%/danger 1e-9）、对手池 `OPP_EVAL2/OPP_BELIEF`、
+  3M belief 标签数据（`output/belief_labels_shard_*.npz`，12.6k rows/s）。
+- **gen4**：gen1 配方（固定锚、gumbel k8/D2/β32、from old-best）+ 对手池
+  CUR0.4/BC0.2/GREEDY0.1/EVAL2 0.3，92 iters/12.1M decisions/3.3h。in-env 形态
+  健康（vs_eval2 每席位 +13~20pp）。**arena 裁决（1000p duplicate vs NM(old)）：
+  −1.5% [−3.6,+0.6]，不晋升**。pkl：`output/dup_g4_vs_old_1000.pkl`。
+- **AZ 谱系终审**：gen2 移动锚 −2.9%、gen3 固定锚 2×算力 −1.6%（真规则重审）、
+  gen4 eval2 对手池 −1.5%——锚型/算力/**对手分布**三个假说全部证伪，
+  AZ 闭环对 arena 的增益为零，谱系彻底收官。old soup 网仍是 NN 冠军。
+- **P2（BeliefExp 防守知识蒸馏）**：danger 头重训成功（tau 0.156→0.565，
+  旧头死亡量化：排序 3.6×差、防守命中率 45.8% vs 80.3%）；
+  但 Gumbel+新 danger 头 pool 4.5% 依然垫底（**S1 双根因盖棺**：防守通道
+  + 进攻重排都断，π' 部署永久关闭）；BeliefExp 蒸馏网 NM vs Baseline
+  −0.3% [−2.1,+1.5] 平局。
+- **顶层均衡（终局）**：Baseline ≈ BeliefExp ≈ NM(old) ≈ Full(old) ≈ NM(distill)
+  **五和局**；anchor=baseline。防守知识可蒸馏，但不改变均衡。
+- **平台级发现（本次）**：BeliefExp 的 eval2 实为「空 Context」（Cython 快路径
+  静默忽略 used，AGENTS §7.18）；Cython eval0 实际 pair_coef=1.0 ≠ config 0.6。
+
 ### 断代后重建：①谱系重排 ②完全体修复（2026-07-19，均结案）
 
 - **① NM(old) 位置**：vs Baseline **+0.0%**（48-48 平局）、vs BeliefExp **+0.0%**
