@@ -45,9 +45,11 @@ class HybridNNBeliefAgent(agent.Agent):
         self.belief_agent.melds = self.melds
 
     def add_meld(self, meld_type, tile_val):
+        # cur/melds 在 init_tiles 已共享为同一列表对象：只需追加一次。
+        # （历史 bug：外层+两个组件各调一次 add_meld，同一列表被追加 3 次，
+        # 每组副露出现 3 次，full_hand 副露计数与 is_win_with_melds 的
+        # n_melds 全错——2026-07-19 修复）
         super().add_meld(meld_type, tile_val)
-        self.nn_agent.add_meld(meld_type, tile_val)
-        self.belief_agent.add_meld(meld_type, tile_val)
 
     def handle_msg(self, msg):
         self.nn_agent.handle_msg(msg)

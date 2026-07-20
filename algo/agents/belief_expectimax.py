@@ -160,6 +160,18 @@ class BeliefExpectimaxAgent(agent.Agent):
                 out.append(t)
         return out
 
+    def _meld_eval_tiles(self):
+        """副露的评估用物理牌：每组 3 张（杠的第 4 张对面子分解冗余）。
+
+        拼进闭手后 eval0/eval2 的组合分解会把副露自然计为已完成面子，
+        使 expectimax 对副露手牌可见（2026-07-19 修复：此前只喂闭手，
+        副露玩家的手牌在搜索里永远无法成和 → 搜索层对副露手牌是瞎的）。
+        """
+        out = []
+        for _mtype, t in self.melds:
+            out.extend([t, t, t])
+        return out
+
     def _remove_one(self, hand, tile_value):
         hand = list(hand)
         hand.remove(tile_value)
@@ -186,7 +198,8 @@ class BeliefExpectimaxAgent(agent.Agent):
             'selected_value': offense score of chosen tile,
         }
         """
-        assert len(self.cur) == 14
+        meld_eval = self._meld_eval_tiles()
+        assert len(self.cur) + len(meld_eval) == 14
 
         type_ctx = self._legacy_context()
         candidates = self._unique_tiles(self.cur)
@@ -196,7 +209,7 @@ class BeliefExpectimaxAgent(agent.Agent):
         else:
             scored = []
             for disc in candidates:
-                hand13 = self._remove_one(self.cur, disc)
+                hand13 = self._remove_one(self.cur, disc) + meld_eval
                 score = algo.eval0(hand13, type_ctx)
                 scored.append((score, disc))
             scored.sort(reverse=True)
@@ -206,7 +219,7 @@ class BeliefExpectimaxAgent(agent.Agent):
         score_map = {}
         danger_map = {}
         for disc in top:
-            hand13 = self._remove_one(self.cur, disc)
+            hand13 = self._remove_one(self.cur, disc) + meld_eval
             offense = self._eval2(hand13)
             danger = opponent.tile_danger(disc, self.context, self.name)
             evaluated.append((offense, danger, disc))

@@ -170,6 +170,28 @@ PYTHONPATH=. python3 scripts/rl/benchmark_duplicate.py \
   才可信；jaxenv 训练环规则本就正确（副露可胡），错的是 arena 裁判与
   Hybrid 的搜索层副露表示。
 
+### 断代后重建：①谱系重排 ②完全体修复（2026-07-19，均结案）
+
+- **① NM(old) 位置**：vs Baseline **+0.0%**（48-48 平局）、vs BeliefExp **+0.0%**
+  （51-51 平局）——顶层是**四和局：Baseline ≈ BeliefExp ≈ NM(old) ≈ Full(old)**，
+  Baseline 凭 5000p 胜 BeliefExp/NM(jaxg) 保持 anchor。
+- **② 完全体修复**（HybridNNBeliefAgent 原地修复）：
+  a. `melds` 三重复制 quirk（§7.13 本尊：共享列表被追加 3 次）→ 只追加一次，
+     副露表示与和牌裁判 n_melds 归一；
+  b. BeliefExp 搜索层用「闭手 + 副露×3」合成标准 13 张喂 eval0/eval2
+     （副露计为已完成面子，expectimax 零改动）。
+  判决（1000p duplicate）：Full(old) vs Baseline **−0.1%**（135-136 平局）、
+  vs NM(old) +0.3% n.s.——**修复正确必要但无增量**（副露速度收益与点炮成本
+  19.2%↔13.2% 恰好抵消）。pool +7.3pp 又是非配对错觉。
+- **gen3 真规则重审**（NM 形态，权重复用不重训）：vs NM(old) **−1.6% [−3.9,+0.7]**
+  ——AZ 谱系确认不超 old soup 网；其问题不是规则而是**对手分布**
+  （环内只有自己克隆，无 eval2 系对手），与 M2 同课。④（1b 公平复审）就此结案。
+- **③ 数据重生成需求降级**：BC 教师数据来自从不副露的 eval2 系 agent 自对弈，
+  僵尸 bug 几乎未触及（无副露则裁判正确）——**BC 数据基本干净**；
+  受污染的是会碰牌的 NN 系自对弈数据（V3-NN/PPO self-play）。
+- 剩余未试的实质选项：jaxenv 训练环加入 eval2 系对手（greedy 镜像）修对手分布
+  （M2' 思路）；或接受顶层四和局收敛。
+
 ### Gumbel gen3（2026-07-19，**不晋升**——固定锚 AZ 迭代到头）
 
 - gen1 配方复刻：固定 KL 锚 0.2，init=`jax_gumbel_pilot/iter92.msgpack`，
