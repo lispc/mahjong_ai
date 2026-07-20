@@ -36,22 +36,24 @@
     search_value，--search-k2 控制叶状态候选数）；--search-chunk 控制每次
     vmap 的 env 数（lax.map 分块，防 ply2 大 batch 爆显存）。
 
-对手池（--opp-pool CUR,GEN1,BC,GREEDY,EVAL2，缺省 1,0,0,0 = 纯自对弈，逐位行为与
-旧版逐 bit 一致；也接受旧版 4 元权重，末尾自动补 0）：
+对手池（--opp-pool CUR,GEN1,BC,GREEDY,EVAL2,BELIEF，缺省 1,0,0,0 = 纯自对弈，逐位
+行为与旧版逐 bit 一致；也接受旧版 4/5 元权重，末尾自动补 0）：
 - 每局 init/reset 时按权重为每个座位独立采样类型：CUR=当前 params（学习对象），
   GEN1=--opp-gen1 冻结 msgpack，BC=--init 冻结副本（=KL 锚 ref），GREEDY=
   jaxenv/greedy.py 的 shanten 贪心，EVAL2=jaxenv/eval2jax.py 的 arena Baseline
-  移植（algo.select 默认 eval2 度量 + 能胡必胡/不碰不杠/不报听）。
-  reset（done 自动开新局）时同步重采样。
-- rollout 每步对全 batch 算 current/gen1/BC 三个 net 的前向 + greedy/eval2 action，
-  按 seat_types[env, actor] 选择本步动作（3× 前向成本；gen1/BC 权重为 0 的类型
-  在 trace 时静态跳过其前向；greedy/eval2 同理）。gumbel 搜索目标只用 current
-  net 计算（静态形状下仍 vmap 全 batch，但仅 current 座位的样本被 keep 消费，见下）。
+  移植（algo.select 默认 eval2 度量），BELIEF=jaxenv/beliefjax.py 的
+  BeliefExpectimaxAgent 移植（eval2 进攻 + tile_danger 防守 + margin 规则 +
+  报听启发式）。reset（done 自动开新局）时同步重采样。
+- rollout 每步对全 batch 算 current/gen1/BC 三个 net 的前向 + greedy/eval2/belief
+  action，按 seat_types[env, actor] 选择本步动作（3× 前向成本；gen1/BC 权重为 0
+  的类型在 trace 时静态跳过其前向；greedy/eval2/belief 同理）。gumbel 搜索目标
+  只用 current net 计算（静态形状下仍 vmap 全 batch，但仅 current 座位的样本被
+  keep 消费，见下）。
 - 训练数据只保留 current 座位：GAE keep 掩码加 seat_types==CUR 条件；gumbel CE、
   agree 统计均随之只在 current 座位决策上生效。终局 reward 仍按座位照常分配。
 - 日志：每 iter 打印各类型座位占比；eval 除 1v3/3v1（vs ref）外，池含 GEN1 时
-  加当前 argmax vs gen1 argmax 1v3，含 GREEDY/EVAL2 时加当前 argmax vs
-  greedy/eval2 1v3。
+  加当前 argmax vs gen1 argmax 1v3，含 GREEDY/EVAL2/BELIEF 时加当前 argmax vs
+  greedy/eval2/belief 1v3。
 """
 
 import argparse
@@ -68,6 +70,7 @@ from flax import serialization
 import optax
 
 from jaxenv import env as env_mod
+from jaxenv.beliefjax import belief_action
 from jaxenv.eval2jax import eval2_action
 from jaxenv.greedy import greedy_action
 from jaxenv.model_flax import build_model_flax
@@ -78,8 +81,8 @@ NEG = -1e9
 N_ACTIONS = env_mod.N_ACTIONS
 
 # 对手池座位类型
-OPP_CUR, OPP_GEN1, OPP_BC, OPP_GREEDY, OPP_EVAL2 = 0, 1, 2, 3, 4
-OPP_NAMES = ('CUR', 'GEN1', 'BC', 'GREEDY', 'EVAL2')
+OPP_CUR, OPP_GEN1, OPP_BC, OPP_GREEDY, OPP_EVAL2, OPP_BELIEF = 0, 1, 2, 3, 4, 5
+OPP_NAMES = ('CUR', 'GEN1', 'BC', 'GREEDY', 'EVAL2', 'BELIEF')
 
 
 # ---------------------------------------------------------------------------
@@ -143,7 +146,7 @@ def make_rollout_fn(model, t_steps, search_cfg=None, play_searched=False,
     可选 ply2=/k2=/chunk= 键启用 best-first 2-ply，见 _pi_prime_batched）。
     gumbel 模式下 batch 额外含 (pi_prime(T,N,34), prior_arg(T,N), pi_arg(T,N))；
     play_searched=True 时 current 座位的 DISCARD 决策改从 π' 采样（AZ 闭环）。
-    pool_w: None（纯自对弈，行为与旧版逐 bit 一致）或 (5,) 座位类型权重；
+    pool_w: None（纯自对弈，行为与旧版逐 bit 一致）或 (6,) 座位类型权重；
     非 None 时 batch 额外含 seat_types(T,N,4)，reset 的局按权重重采样座位类型。
     opp_params: (gen1_params, bc_params)；权重为 0 的类型传 None（静态跳过前向）。
     reward_kind: 环境奖励类型（score / winloss / score_dd），贯穿 init/reset。
@@ -156,6 +159,7 @@ def make_rollout_fn(model, t_steps, search_cfg=None, play_searched=False,
     use_bc = pool_active and pool_w[OPP_BC] > 0
     use_greedy = pool_active and pool_w[OPP_GREEDY] > 0
     use_eval2 = pool_active and pool_w[OPP_EVAL2] > 0
+    use_belief = pool_active and pool_w[OPP_BELIEF] > 0
     if pool_active:
         pool_logits = jnp.log(jnp.clip(jnp.asarray(pool_w, jnp.float32), 1e-9, 1.0))
 
@@ -219,6 +223,9 @@ def make_rollout_fn(model, t_steps, search_cfg=None, play_searched=False,
             if use_eval2:
                 ae = jax.vmap(eval2_action)(states)
                 act = jnp.where(stype == jnp.int8(OPP_EVAL2), ae, act)
+            if use_belief:
+                ab = jax.vmap(belief_action)(states)
+                act = jnp.where(stype == jnp.int8(OPP_BELIEF), ab, act)
 
         # from-scratch 简化：hu 自动（能胡必胡）、报听恒否——对全部座位生效
         if auto_hu:
@@ -427,6 +434,26 @@ def make_eval_step_eval2(model):
     return eval_step
 
 
+def make_eval_step_belief(model):
+    """当前 argmax vs belief_action（BeliefExpectimax 移植）对手的 eval step。"""
+    @jax.jit
+    def eval_step(cur_params, states, cur_seat):
+        obs = jax.vmap(observe)(states)
+        masks = jax.vmap(env_mod.legal_mask)(states)
+        phase = states.phase.astype(jnp.int32)
+        out_c = model.apply({'params': cur_params}, obs)
+        lc = build_logits(out_c, phase, masks)
+        actor = jax.vmap(actor_of)(states)
+        use_cur = cur_seat[actor]                             # (N,) bool
+        safe = jnp.where(states.done[:, None], jnp.zeros(N_ACTIONS, jnp.float32), lc)
+        act_c = jnp.argmax(safe, -1).astype(jnp.int8)
+        act_b = jax.vmap(belief_action)(states)
+        act = jnp.where(use_cur, act_c, act_b)
+        return jax.vmap(env_mod.step)(states, act)[0]
+
+    return eval_step
+
+
 def play_eval_generic(step_fn, n_games, cur_seat, rng, max_steps=600):
     """打 n_games 局（vmapped），step_fn(states, seat) -> states。返回指标 dict。"""
     keys = jax.random.split(rng, n_games)
@@ -519,20 +546,20 @@ def main():
                     help='TENPAI 阶段强制报听恒否（删报听决策维度；样本从训练剔除）')
     ap.add_argument('--eval-greedy', action='store_true',
                     help='eval 额外跑 vs shanten-greedy（from-scratch 里程碑指标）')
-    # 对手池：CUR,GEN1,BC,GREEDY,EVAL2 五个 0-1 权重（和为 1；缺省纯自对弈；
-    # 兼容旧版 4 元写法 CUR,GEN1,BC,GREEDY，末尾自动补 0）
+    # 对手池：CUR,GEN1,BC,GREEDY,EVAL2,BELIEF 六个 0-1 权重（和为 1；缺省纯自对弈；
+    # 兼容旧版 4/5 元写法，末尾自动补 0）
     ap.add_argument('--opp-pool', default='1,0,0,0',
-                    help='座位类型权重 CUR,GEN1,BC,GREEDY,EVAL2，如 0.5,0.2,0.1,0.1,0.1'
-                         '（旧版 4 元写法末尾补 0）')
+                    help='座位类型权重 CUR,GEN1,BC,GREEDY,EVAL2,BELIEF，'
+                         '如 0.5,0.1,0.1,0.1,0.1,0.1（旧版 4/5 元写法末尾补 0）')
     ap.add_argument('--opp-gen1', default='output/jax_gumbel_pilot/iter92.msgpack',
                     help='GEN1 对手的冻结 msgpack')
     args = ap.parse_args()
 
     pool_w = np.array([float(x) for x in args.opp_pool.split(',')], np.float64)
-    if pool_w.shape == (4,):                       # 向后兼容旧版 4 元权重
-        pool_w = np.concatenate([pool_w, [0.0]])
-    assert pool_w.shape == (5,) and (pool_w >= 0).all(), \
-        f'--opp-pool 需为 4 或 5 个非负权重: {args.opp_pool}'
+    if pool_w.shape in ((4,), (5,)):                # 向后兼容旧版 4/5 元权重
+        pool_w = np.concatenate([pool_w, np.zeros(len(OPP_NAMES) - pool_w.shape[0])])
+    assert pool_w.shape == (len(OPP_NAMES),) and (pool_w >= 0).all(), \
+        f'--opp-pool 需为 4-6 个非负权重: {args.opp_pool}'
     assert abs(pool_w.sum() - 1.0) < 1e-6, \
         f'--opp-pool 权重和须为 1: {pool_w.sum()}'
     pool_active = bool((pool_w[1:] > 0).any())
@@ -578,6 +605,8 @@ def main():
         if (pool_active and pool_w[OPP_GREEDY] > 0) or args.eval_greedy else None
     eval_step_eval2 = make_eval_step_eval2(model) \
         if pool_active and pool_w[OPP_EVAL2] > 0 else None
+    eval_step_belief = make_eval_step_belief(model) \
+        if pool_active and pool_w[OPP_BELIEF] > 0 else None
 
     rng = jax.random.PRNGKey(args.seed)
     rng, k_init, k_eval = jax.random.split(rng, 3)
@@ -694,7 +723,8 @@ def main():
         if it % args.eval_every == 0:
             n_extra = (int(gen1_params is not None)
                        + int(eval_step_greedy is not None)
-                       + int(eval_step_eval2 is not None))
+                       + int(eval_step_eval2 is not None)
+                       + int(eval_step_belief is not None))
             ks = jax.random.split(k_eval, 3 + n_extra)
             k_eval = ks[0]
             k1, k3 = ks[1], ks[2]
@@ -743,6 +773,17 @@ def main():
                       f'dealin(cur/eval2)={me2["cur_dealin"]:.3f}/'
                       f'{me2["ref_dealin"]:.3f}', flush=True)
                 ev_rec['vs_eval2'] = me2
+            if eval_step_belief is not None:
+                mbl = play_eval_generic(
+                    lambda s, seat: eval_step_belief(params, s, seat),
+                    args.eval_games, np.array([True, False, False, False]), ks[ki])
+                ki += 1
+                print(f'[eval] iter {it} vs_belief 1v3: win_diff='
+                      f'{mbl["win_diff"]:+.3f} (cur {mbl["cur_win"]:.3f} vs belief '
+                      f'{mbl["ref_win"]:.3f}) draw={mbl["draw"]:.3f} '
+                      f'dealin(cur/belief)={mbl["cur_dealin"]:.3f}/'
+                      f'{mbl["ref_dealin"]:.3f}', flush=True)
+                ev_rec['vs_belief'] = mbl
             mlog.write(json.dumps(ev_rec) + '\n')
 
         if it % args.save_every == 0:

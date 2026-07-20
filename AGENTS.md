@@ -214,7 +214,7 @@ tail -f output/compute_mc_values_pypy_5000_part0.log
 
 | 文件 | 职责 |
 |---|---|
-| `jaxenv/` | **JAX 高速对局环境 + PPO 管线（2026-07-17，方向 1）**：`env.py`（Pgx 风格晋北环境，547k steps/s@batch4096 单 3090）、`rules.py`+`tables.npz`（查找表胡牌/向听；**tables.npz 被 gitignore，clone 后先跑 `PYTHONPATH=. python3 jaxenv/gen_tables.py` 生成，~1.2s**）、`model_flax.py`（TileConvNet linen 移植）、`obs.py`（175 维观测，与部署 PPOAgent 对齐 <1e-6）、`ppo.py`（PPO+KL 锚训练，对手池 `--opp-pool CUR,GEN1,BC,GREEDY,EVAL2`）、`eval2jax.py`+`gen_eval2_tables.py`（arena Baseline 移植：algo.select 默认 eval2 度量，Cython pair_coef=1.0 语义，整数分子精确 tie-break；**tables_eval2.npz 同样被 gitignore，clone 后先跑 `PYTHONPATH=. python3 jaxenv/gen_eval2_tables.py` 生成**）、`convert_torch.py`/`convert_back.py`（权重双向转换）、`test_*.py`（验证套件，含 `test_eval2jax.py` eval0/弃牌 parity）。详见 `docs/reports/jax-rl-0717.md` |
+| `jaxenv/` | **JAX 高速对局环境 + PPO 管线（2026-07-17，方向 1）**：`env.py`（Pgx 风格晋北环境，547k steps/s@batch4096 单 3090）、`rules.py`+`tables.npz`（查找表胡牌/向听；**tables.npz 被 gitignore，clone 后先跑 `PYTHONPATH=. python3 jaxenv/gen_tables.py` 生成，~1.2s**）、`model_flax.py`（TileConvNet linen 移植）、`obs.py`（175 维观测，与部署 PPOAgent 对齐 <1e-6）、`ppo.py`（PPO+KL 锚训练，对手池 `--opp-pool CUR,GEN1,BC,GREEDY,EVAL2,BELIEF`）、`eval2jax.py`+`gen_eval2_tables.py`（arena Baseline 移植：algo.select 默认 eval2 度量，Cython pair_coef=1.0 语义，整数分子精确 tie-break；**tables_eval2.npz 同样被 gitignore，clone 后先跑 `PYTHONPATH=. python3 jaxenv/gen_eval2_tables.py` 生成**）、`beliefjax.py`（BeliefExpectimaxAgent 移植：eval0 top-8 + eval2 进攻 + tile_danger 防守 + margin 规则 + 报听启发式；注意其 eval2 进攻分在 arena 实为**空 Context 版**——Cython 快路径静默忽略 used）、`convert_torch.py`/`convert_back.py`（权重双向转换）、`test_*.py`（验证套件，含 `test_eval2jax.py`/`test_beliefjax.py` parity）。详见 `docs/reports/jax-rl-0717.md` |
 | `algo/nn/model.py` | Policy-Value Net（PyTorch）；`TileConvNet` 现支持 `se_ratio`、`attn_heads`、`attn_layers`、`wait_dist_head` |
 | `algo/nn/value_model.py` | Deep Value Net（PyTorch） |
 | `algo/nn/nn_leaf.py` | ExpectiMax 叶子估值接口；可用 `MJ_NN_VALUE_MODEL` 指定 policy-value 网络当 value leaf |
@@ -379,6 +379,7 @@ PYTHONPATH=. python3 scripts/rl/train_wait_dist.py \
 15. **belief/采样类 agent 的 arena accounting 规则（2026-07-19，两次 pool 崩溃换来）**：被碰/杠/胡的牌**不广播 'put'**（`driver/engine.py:331`），整组副露物理牌对 context 不可见，belief 采样前必须用 'meld' 消息自行跟踪剔除（碰 3/杠 4）；自己打出的牌被 claim 时 `used` 不撤回，需手动撤回；对手闭手数 = 13 − 3×副露数。详见 `docs/reports/gumbel-deploy-0719.md` §3。
 16. ~~**arena 与 jaxenv 和牌判定不一致**~~（**2026-07-19 已修**）：`Agent.add`/`respond_hu` 改用 `algo.eval.v2.is_win_with_melds`（副露每组计一个已完成面子、无副露允许七对子），与 jaxenv/真实规则对齐；`algo.is_succ` 本身未动（legacy 测试依赖）。**规则断代**：此前所有 benchmark（含晋升链）在旧 meta（副露判负、无七对）下产生，跨断代数字不可直接比较。
 17. **π' 搜索直接部署证伪 + dealin 头已死（2026-07-19）**：JAX 系训练从未监督 dealin 头，trunk 漂移使其 arena 输出恒 ≈0.31 无区分度；「NN 叶 ≤ eval2 叶」有 arena 直接证据（×300 −4.6% 显著）。任何「NN 叶替换 eval2」或「无防守条件的轻搜索」方向勿再开。
+18. **BeliefExp 的 eval2 实为「空 Context」（2026-07-20 发现）**：`algo.eval2` Cython 快路径要求 context 有 `all_tiles_as_dict` 方法才使用 `used`，legacy `context.Context` 没有 → BeliefExp 精心维护的 `used` 被**静默忽略**，其 eval2 进攻分与 Baseline 一样只看手牌；「belief」只存在于 danger 表。这解释了新 meta 里 Baseline ≈ BeliefExp（进攻同构）。`beliefjax.py` 按此实际行为移植；若修复 Python 侧使 used 生效（可能改变 BeliefExp 强度，需重测），jax 侧需同步。
 
 ---
 
