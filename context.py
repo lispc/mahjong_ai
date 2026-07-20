@@ -40,3 +40,18 @@ class Context:
             delta[k] /= s
         return delta
 
+
+class UsedAwareContext(Context):
+    """带 `all_tiles_as_dict()` 的 Context：让 algo.eval2 的 Cython 快路径
+    真正使用 `used`（已见牌）条件化剩余牌分布。
+
+    背景（2026-07-20，AGENTS.md §7.18）：`algo.eval2` 只在 context 有
+    `all_tiles_as_dict` 方法时才把 used 传给 Cython；legacy `Context` 没有
+    该方法，used 被静默忽略。默认 `Context` 行为保持不变，需要 used 生效的
+    agent 显式使用本子类。
+    """
+
+    def all_tiles_as_dict(self):
+        """返回已见牌字典（tile -> 张数），语义与 algo.eval2 快路径的约定一致。"""
+        return self.used
+

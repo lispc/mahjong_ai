@@ -370,7 +370,7 @@ def eval2_counts(counts_tuple, c=context.Context()):
     return eval_rec(counts_tuple, eval1_counts, c)
 
 
-def eval2(tiles, c=context.Context()):
+def eval2(tiles, c=context.Context(), pair_coef=None):
     if isinstance(tiles, tuple) and len(tiles) == 34:
         return eval2_counts(tiles, c)
     # 优先使用 Cython 加速版本
@@ -380,7 +380,11 @@ def eval2(tiles, c=context.Context()):
         if c is not None and hasattr(c, 'all_tiles_as_dict'):
             d = c.all_tiles_as_dict()
             used_tiles = [t for t, cnt in d.items() for _ in range(int(cnt))]
-        return _fast_eval0.eval2_metric_tiles(tiles, used_tiles)
+        if pair_coef is None:
+            # 保持历史默认：Cython 快路径 pair_coef=1.0（与 config.pair_coef=0.6
+            # 的 Python 路径语义不同，2026-07-20 发现；A/B 期间勿改默认值）
+            return _fast_eval0.eval2_metric_tiles(tiles, used_tiles)
+        return _fast_eval0.eval2_metric_tiles(tiles, used_tiles, pair_coef)
     except Exception:
         pass
     return eval_rec(tiles, eval1_counts, c)

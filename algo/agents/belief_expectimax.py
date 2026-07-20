@@ -68,7 +68,8 @@ class BeliefExpectimaxAgent(agent.Agent):
                  nn_model_path=None,
                  nn_top_k=None,
                  device='cpu',
-                 eval_backend='legacy'):
+                 eval_backend='legacy',
+                 used_aware_eval2=False):
         super().__init__(name, verbose)
         self.max_candidates = max_candidates
         self.defense_margin = defense_margin
@@ -81,6 +82,9 @@ class BeliefExpectimaxAgent(agent.Agent):
         self._nn_extract = None
         self.eval_backend = eval_backend
         self._fast_eval = None
+        # True 时 eval2 的 Cython 快路径真正使用已见牌（used）条件化剩余分布；
+        # 默认 False 保持历史行为（used 被静默忽略，AGENTS.md §7.18）
+        self.used_aware_eval2 = used_aware_eval2
 
     def init_tiles(self, l):
         super().init_tiles(l)
@@ -95,8 +99,14 @@ class BeliefExpectimaxAgent(agent.Agent):
         return super().handle_msg(msg)
 
     def _legacy_context(self):
-        """把 ContextV3 的信念映射成 legacy context.Context（algo.eval2 所需）。"""
-        c = ctx_module.Context()
+        """把 ContextV3 的信念映射成 legacy context.Context（algo.eval2 所需）。
+
+        used_aware_eval2=True 时返回 UsedAwareContext（带 all_tiles_as_dict），
+        Cython 快路径因此真正使用 used；否则返回普通 Context，used 被快路径忽略
+        （历史默认行为）。
+        """
+        cls = ctx_module.UsedAwareContext if self.used_aware_eval2 else ctx_module.Context
+        c = cls()
         c.used = self.context.used.copy()
         return c
 

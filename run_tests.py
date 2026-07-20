@@ -9,6 +9,7 @@ TESTS = [
     'tests/test_eval_v2.py',
     'tests/test_shanten_ukeire.py',
     'tests/legacy_test.py',
+    'tests/test_eval2_used_paircoef.py',
 ]
 
 

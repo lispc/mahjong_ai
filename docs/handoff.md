@@ -6,32 +6,24 @@
 
 ## 1. 当前最强配置
 
-```python
-# benchmark token: hybrid:JAXG:output/jax_gumbel_iter92.pt
-# 对应类：algo.agents.hybrid_nn_belief_agent.HybridNNBeliefAgent
-from algo.agents.hybrid_nn_belief_agent import HybridNNBeliefAgent
+> **⚠️ 2026-07-19 规则断代**：arena 修复副露和牌/七对子判负后，断代前所有
+> benchmark（含本节历史数字）不可与断代后直接比较。断代后重锚结论（duplicate）：
+>
+> - **当前 best（anchor）= `baseline`**（纯 eval2 贪心，无 NN、无搜索）
+>   - Baseline vs BeliefExp 5000p：+2.5% [+1.5,+3.4]
+>   - Baseline vs hybridnm:NM:jax_gumbel_iter92 5000p：+2.1% [+0.9,+3.4]
+> - **最强 NN 权重 = `output/nn_full_action_best.pt`**，以 `hybridnm`（禁碰杠
+>   Hybrid，`HybridNNBeliefNoMeldAgent`）形态部署；顶层实为五和局：
+>   Baseline ≈ BeliefExp ≈ NM(old) ≈ Full(old) ≈ NM(distill)
+> - 旧 Hybrid（可碰杠形态）在真规则下死刑（vs NM −18.4%）：NN response 头碰牌 +
+>   搜索层对压缩副露表示误判 = 僵尸 meta artifact（详见 §4 C5 节）
+> - 断代前晋升链（含 1b AZ +2.0%）全部作废，勿再引用断代前数字作强度依据
 
-HybridNNBeliefAgent(
-    'Hybrid-FullAction-Gumbel92',
-    nn_model_path='output/jax_gumbel_iter92.pt',
-    belief_kind='beliefexp',
-    tenpai_threshold=28,
-    device='cpu',
-)
-```
+断代前最强配置（存档，勿用）：`HybridNNBeliefAgent('Hybrid-FullAction-Gumbel92',
+nn_model_path='output/jax_gumbel_iter92.pt', belief_kind='beliefexp',
+tenpai_threshold=28, device='cpu')`——断代后用 `hybridnm` 变体替代。
 
-对应模型：`output/jax_gumbel_iter92.pt` + `output/jax_gumbel_iter92_config.json`
-- `TileConvNet`，128 channels / 6 residual blocks / 512 hidden
-- 带 dealin / value / tenpai / response head
-- 来源：**JAX 引擎自对弈 + Gumbel-top-k 1-ply 搜索目标 AZ 闭环（12M decisions）**，
-  从 `nn_full_action_best.pt` 出发经 KL 锚 PPO 训练（`jaxenv/ppo.py --target-mode gumbel`）
-- 晋升证据（11000 pairs 合并）：**vs 旧 best +2.0% [+1.1,+2.9]**（score-proxy
-  +0.054 [+0.023,+0.084] @5000），协议全流程通过（`docs/reports/jax-rl-0717.md` 附录）
-
-旧 best（2026-07-17 前）：`output/nn_full_action_best.pt`（model soup + 蒸馏，
-`docs/reports/project_history.md` §6.11–§6.12）。
-
-400 局同一 pool 参考结果：
+<details><summary>断代前 400 局参考（存档）</summary>
 
 | Agent | win | self | ron | deal-in | draw | Elo |
 |---|---|---|---|---|---|---|
@@ -39,6 +31,8 @@ HybridNNBeliefAgent(
 | Hybrid-oldbest | 28.2% | 8.2% | 20.0% | 19.5% | 0.5% | 1519 |
 | BeliefExp | 19.2% | 6.0% | 13.2% | 16.0% | 0.5% | 1502 |
 | Baseline | 17.8% | 5.8% | 12.0% | 21.0% | 0.5% | 1350 |
+
+</details>
 
 ---
 
@@ -80,9 +74,46 @@ PYTHONPATH=. python3 scripts/rl/benchmark_duplicate.py \
 
 ---
 
-## 4. 项目状态（2026-07-18 凌晨）——**方向 1b 晋升：Gumbel AZ 闭环产出新 best**
+## 4. 项目状态（2026-07-20）——**断代重锚完成：anchor = baseline，顶层五和局**
 
-### 方向 1b（Gumbel 搜索目标 AZ 闭环）：**晋升**（项目史上首个 RL 来源晋升）
+> 最新判决见最上一节；历史节按时间倒序保留（含断代前存档，数字勿跨断代引用）。
+
+### JAX 复式评测 arena（2026-07-20，多后端第二考场，交付）
+
+- **新增** `jaxenv/duplicate_arena.py` + `scripts/rl/benchmark_duplicate_jax.py` +
+  `test_duplicate_arena.py`（独立测试，未入 run_tests），**纯增量、Python 考场零改动**。
+- 座位类型：`baseline`(=eval2jax) / `beliefexp`(=beliefjax) / `greedy` /
+  `nn:LABEL:PATH`（flax masked argmax，AutoHu 风格：能胡必胡、恒不报听）；
+  配对统计公式逐行镜像 Python 版，pkl schema 一致（可复用重算工具）。
+- 门禁全过：deal identity 逐 bit；确定性（baseline vs baseline 500/500 ties、
+  score-proxy 恰 0）；跨后端 sanity 500 seeds（|Δ|=3.6pp ≤ 4pp，CI 重叠，
+  残差来自 beliefjax ~98% parity + 两端同 seed 牌墙不同）；paired 公式与
+  Python 自算 10 字段逐位相等。
+- 速度：暖缓存 1000 seeds ~29s vs Python ~64s（**~2.2×**，未达 10×——一次性
+  XLA trace ~13s + eval2 查表展开编译开销；冷编译 ~2.5min 一次性落盘缓存）。
+  适合**同配置反复 A/B**（暖缓存甜区），不适合取代 Python 考场作协议裁决。
+- **已知限制**：无 hybridnm 座位（搜索层未移植）——断代后标准三件套只能近似
+  （beliefexp 或 NN argmax 顶替），协议级晋升判决仍走 Python 考场。
+
+### used 修复 + pair_coef A/B（2026-07-20，双阴性，结案）——详见 `docs/reports/used-paircoef-ab-0720.md`
+
+- **used 修复（§7.18 后续）**：`beliefexpused`（UsedAwareContext，eval2 真正
+  条件化已见牌）1000p duplicate vs Baseline **−2.6% [−5.0,−0.2]**——点炮
+  −2.6pp（防守变好）但胜率显著负，「更守但不更强」第四次同构阴性（route-a
+  BaseDef / Baseline+ / Eval2Ctx+BD 之后）。**不修复即现状语义，jax 侧无需同步**。
+- **pair_coef A/B**：Cython de-facto 1.0 vs config 0.6 = −1.0% [−2.5,+0.5]
+  （94.2% 平局）→ 历史不一致**无需修复**，维持 1.0。
+- 推论：「Baseline ≈ BeliefExp 因进攻同构（used 被忽略）」的假说被削弱——
+  used 通道本身不是强度杠杆，与 god-mode 上界 +1.2% 互洽。
+- 附带考古：route-a 的 Eval2Ctx 同样被 Cython 迁移静默回退——used-aware
+  eval2 在 Cython 时代从未上过场，本次是其首次功率充分测量。
+- 资产：`UsedAwareContext`、`used_aware_eval2` 开关、`eval2(..., pair_coef=)`、
+  `beliefexpused`/`baselinepc06` token、Cython↔Python eval2 逐值 parity 测试套件。
+
+### 方向 1b（Gumbel 搜索目标 AZ 闭环）：~~**晋升**~~（**断代后已反转**，存档）
+
+> ⚠️ 本节 +2.0% 晋升证据产生于僵尸 meta（副露判负），真规则下 NM 形态重测
+> 反转（NM(jaxg) vs NM(old) −2.8%）。结论与数字仅存档，见下方「C5 meta 翻转」节。
 
 - `jaxenv/` 全管线（JAX 引擎 547k steps/s + Flax 移植 + obs 对齐 + PPO+KL 锚 +
   Gumbel-top-k 1-ply 搜索目标）。β=32 校准（子任务默认 β=8 翻不动 prior）。

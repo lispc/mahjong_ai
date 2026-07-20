@@ -67,8 +67,14 @@ class AgentFactory:
     def __call__(self):
         if self.kind == 'baseline':
             return agent.Agent('Baseline', verbose=False)
+        if self.kind == 'baselinepc06':
+            from algo.agents.baseline_pair_coef_agent import BaselinePairCoefAgent
+            return BaselinePairCoefAgent('BaselinePC06', pair_coef=0.6, verbose=False)
         if self.kind == 'beliefexp':
             return BeliefExpectimaxAgent('BeliefExp', verbose=False)
+        if self.kind == 'beliefexpused':
+            return BeliefExpectimaxAgent('BeliefExpUsed', verbose=False,
+                                         used_aware_eval2=True)
         if self.kind == 'beliefexp-fast2':
             return BeliefExpectimaxAgent('BeliefExp-fast2', verbose=False,
                                          eval_backend='fast2')
@@ -291,9 +297,11 @@ class AgentFactory:
 
 
 def _make_factory(token):
-    if token in ('baseline', 'beliefexp', 'v3nnpc', 'beliefexp-fast2'):
+    if token in ('baseline', 'beliefexp', 'v3nnpc', 'beliefexp-fast2',
+                 'baselinepc06', 'beliefexpused'):
         name = {'baseline': 'Baseline', 'beliefexp': 'BeliefExp',
-                'v3nnpc': 'V3-NN-PC', 'beliefexp-fast2': 'BeliefExp-fast2'}[token]
+                'v3nnpc': 'V3-NN-PC', 'beliefexp-fast2': 'BeliefExp-fast2',
+                'baselinepc06': 'BaselinePC06', 'beliefexpused': 'BeliefExpUsed'}[token]
         return AgentFactory(token), name
     if token.startswith('v3nnpck:'):
         k = token.split(':', 1)[1]
