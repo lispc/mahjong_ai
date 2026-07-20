@@ -214,7 +214,7 @@ tail -f output/compute_mc_values_pypy_5000_part0.log
 
 | 文件 | 职责 |
 |---|---|
-| `jaxenv/` | **JAX 高速对局环境 + PPO 管线（2026-07-17，方向 1）**：`env.py`（Pgx 风格晋北环境，547k steps/s@batch4096 单 3090）、`rules.py`+`tables.npz`（查找表胡牌/向听；**tables.npz 被 gitignore，clone 后先跑 `PYTHONPATH=. python3 jaxenv/gen_tables.py` 生成，~1.2s**）、`model_flax.py`（TileConvNet linen 移植）、`obs.py`（175 维观测，与部署 PPOAgent 对齐 <1e-6）、`ppo.py`（PPO+KL 锚训练，对手池 `--opp-pool CUR,GEN1,BC,GREEDY,EVAL2,BELIEF`）、`eval2jax.py`+`gen_eval2_tables.py`（arena Baseline 移植：algo.select 默认 eval2 度量，Cython pair_coef=1.0 语义，整数分子精确 tie-break；**tables_eval2.npz 同样被 gitignore，clone 后先跑 `PYTHONPATH=. python3 jaxenv/gen_eval2_tables.py` 生成**）、`beliefjax.py`（BeliefExpectimaxAgent 移植：eval0 top-8 + eval2 进攻 + tile_danger 防守 + margin 规则 + 报听启发式；注意其 eval2 进攻分在 arena 实为**空 Context 版**——Cython 快路径静默忽略 used）、`convert_torch.py`/`convert_back.py`（权重双向转换）、`test_*.py`（验证套件，含 `test_eval2jax.py`/`test_beliefjax.py` parity）。详见 `docs/reports/jax-rl-0717.md` |
+| `jaxenv/` | **JAX 高速对局环境 + PPO 管线（2026-07-17，方向 1）**：`env.py`（Pgx 风格晋北环境，547k steps/s@batch4096 单 3090）、`rules.py`+`tables.npz`（查找表胡牌/向听；**tables.npz 被 gitignore，clone 后先跑 `PYTHONPATH=. python3 jaxenv/gen_tables.py` 生成，~1.2s**）、`model_flax.py`（TileConvNet linen 移植）、`obs.py`（175 维观测，与部署 PPOAgent 对齐 <1e-6）、`ppo.py`（PPO+KL 锚训练，对手池 `--opp-pool CUR,GEN1,BC,GREEDY,EVAL2,BELIEF`）、`eval2jax.py`+`gen_eval2_tables.py`（arena Baseline 移植：algo.select 默认 eval2 度量，Cython pair_coef=1.0 语义，整数分子精确 tie-break；**tables_eval2.npz 同样被 gitignore，clone 后先跑 `PYTHONPATH=. python3 jaxenv/gen_eval2_tables.py` 生成**）、`beliefjax.py`（BeliefExpectimaxAgent 移植：eval0 top-8 + eval2 进攻 + tile_danger 防守 + margin 规则 + 报听启发式；注意其 eval2 进攻分在 arena 实为**空 Context 版**——Cython 快路径静默忽略 used）、`gen_belief_data.py`（belief 全标签批量生产，镜像 ppo rollout 机制，shard 断点续跑）、`convert_torch.py`/`convert_back.py`（权重双向转换）、`test_*.py`（验证套件，含 `test_eval2jax.py`/`test_beliefjax.py` parity）。详见 `docs/reports/jax-rl-0717.md` |
 | `algo/nn/model.py` | Policy-Value Net（PyTorch）；`TileConvNet` 现支持 `se_ratio`、`attn_heads`、`attn_layers`、`wait_dist_head` |
 | `algo/nn/value_model.py` | Deep Value Net（PyTorch） |
 | `algo/nn/nn_leaf.py` | ExpectiMax 叶子估值接口；可用 `MJ_NN_VALUE_MODEL` 指定 policy-value 网络当 value leaf |
@@ -237,6 +237,7 @@ tail -f output/compute_mc_values_pypy_5000_part0.log
 - `scripts/rl/peng_paired_eval.py`：god-state 快照 + 成对 rollout 因果评估（collect/evaluate/train，passfix_anchor 模式）
 - `scripts/rl/god_mode_upper_bound.py`：god-mode 完美信息上界测量（2026-07-17，方向 0）
 - `scripts/rl/ptie_critic.py`：PTIE 完美信息 critic 管线（collect 含 god 特征 / train_critic / finetune，方向 2）
+- `scripts/rl/train_danger_head.py`：belief danger 头重训（冻结 TileConvNet trunk，top-8 掩码 MSE）+ policy 蒸馏 sanity 管线（P1-1b；报告旧 dealin 头 vs 新头 Kendall-tau/top1 指标对比）
 
 新增 agent（benchmark_pool token）：
 - `hybridend:` = HybridNNBeliefEndgameAgent（Hybrid 接 exact-solver 搜索层，已证无增量）
@@ -262,6 +263,9 @@ tail -f output/compute_mc_values_pypy_5000_part0.log
 | `output/selfplay_raw_*.pkl` | 原始自对弈样本（context, hand14, action, features），等待计算 MC value |
 | `output/duplicate_best_vs_baseline_400.pkl` | duplicate 评测原始结果（400 seeds，Hybrid vs Baseline） |
 | `output/exact_endgame_labels_1000.npz` | 1000 局 BeliefExp 自对弈生成的 exact endgame 防守标签（13,843 样本） |
+| `output/belief_labels_shard_*.npz` | BeliefExp-lite 全标签数据（obs f16/chosen/top8/offense/danger/defense_flag/margin/best_offense；`jaxenv/gen_belief_data.py` 生产，断点续跑；当前 3M=15 shards，自对弈池 CUR0.5/BC0.2/GREEDY0.1/EVAL2 0.1/BELIEF0.1） |
+| `output/nn_danger_belief_v1.pt` | iter92 冻结 trunk + belief danger 重训 dealin 头（`scripts/rl/train_danger_head.py` 产物，含 config json） |
+| `output/nn_policy_distill_belief_v1.pt` | BeliefExp chosen 蒸馏 sanity 模型（同上产物，只作管线验证，不作候选） |
 | `output/wait_dist_labels_*.npz` | 待牌分布监督样本（features + 34-dim wait one-hot） |
 | `output/nn_wait_dist_tenpai_300.pt` | 300 局听牌样本上训练的 wait_dist head 初版 |
 

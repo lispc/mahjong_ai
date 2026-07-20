@@ -165,8 +165,18 @@ def _danger_signal(state):
 # DISCARD：eval0 top-8 + eval2 进攻 + danger 防守 + margin 规则
 # ---------------------------------------------------------------------------
 
-def discard_choice(state):
-    """-> int32 弃牌 idx（不套合法掩码；调用方负责。parity 测试直接可用）。"""
+def _discard_internals(state):
+    """discard 选择的全部中间量（belief_action 与 belief_labels 共享同一计算路径）。
+
+    -> dict:
+        chosen_raw  int32  选择结果（不含合法集兜底，调用方处理）
+        top8        int8[8]   top-8 候选 idx（top 顺序；不足 8 个合法候选末尾 -1）
+        offense     int32[8]  top-8 对应的 eval2 整数分子（填充位 -(1<<30)）
+        danger8     f32/f64[8] top-8 对应的 danger 值（填充位 -1）
+        signal      bool   危险信号（safe mode）
+        margin_f    float  margin = 0.03 + 0.02*报听对手数（展示用；选择用整数阈值）
+        best        int32  top-8 内最大进攻分子
+    """
     turn = state.turn.astype(jnp.int32)
     hand = state.hands[turn].astype(jnp.int32)
     cand = hand > 0                                           # (34,)
@@ -175,26 +185,59 @@ def discard_choice(state):
     e0 = jax.vmap(_eval0_int)(hands13)                        # (34,)
     e0_key = jnp.where(cand, e0 * 64 + _IDX, jnp.int32(-1))
     thr = jnp.sort(e0_key)[-8]                                # 第 8 名（<8 候选时为 -1）
-    top8 = cand & (e0_key >= thr)
+    top8_mask = cand & (e0_key >= thr)
     pos = jnp.argsort(jnp.argsort(-e0_key))                   # top 内名次（0=最优）
     # eval2 进攻分（空 Context 整数分子；arena 实际口径，见模块 docstring）
     n_score = jax.vmap(_eval2_num13)(hands13)                 # (34,)
-    n_masked = jnp.where(top8, n_score, jnp.int32(-(1 << 30)))
+    n_masked = jnp.where(top8_mask, n_score, jnp.int32(-(1 << 30)))
     best = n_masked.max()
     # danger + 安全模式
     danger = tile_danger_vec(state)                           # (34,)
     signal, tenpai_opp = _danger_signal(state)
     margin_int = jnp.asarray(_MARGIN_INT)[jnp.clip(tenpai_opp, 0, 3)]
-    safe = top8 & ((best - n_score) <= margin_int)
+    safe = top8_mask & ((best - n_score) <= margin_int)
     # 危险分支：danger 最小，平局取 top 名次小者
     fx = jnp.result_type(float)
     dmin = jnp.where(safe, danger, jnp.asarray(np.inf, fx)).min()
     pick_pos = jnp.where(safe & (danger == dmin), pos, _POS_BIG).min()
     tile_danger_branch = jnp.argmin(jnp.where(pos == pick_pos, _IDX, _POS_BIG))
     # 无危险分支：offense 最大，平局取 top 名次小者（名次经 63-pos 编入键）
-    sel_key = jnp.where(top8, n_score * 64 + (63 - pos), jnp.int32(-1))
+    sel_key = jnp.where(top8_mask, n_score * 64 + (63 - pos), jnp.int32(-1))
     tile_offense_branch = jnp.argmax(sel_key).astype(jnp.int32)
-    return jnp.where(signal, tile_danger_branch, tile_offense_branch)
+    chosen_raw = jnp.where(signal, tile_danger_branch, tile_offense_branch)
+    # top-8 数组（top 顺序；非法名次填充）
+    order = jnp.argsort(-e0_key)[:8]                          # (8,)
+    valid8 = top8_mask[order]
+    top8_idx = jnp.where(valid8, order, jnp.int32(-1)).astype(jnp.int8)
+    offense8 = jnp.where(valid8, n_score[order], jnp.int32(-(1 << 30)))
+    danger8 = jnp.where(valid8, danger[order],
+                        jnp.asarray(-1.0, fx)).astype(jnp.float32)
+    margin_f = (0.03 + 0.02 * tenpai_opp.astype(fx)).astype(jnp.float32)
+    return dict(chosen_raw=chosen_raw, top8=top8_idx, offense=offense8,
+                danger8=danger8, signal=signal, margin_f=margin_f, best=best)
+
+
+def discard_choice(state):
+    """-> int32 弃牌 idx（不套合法掩码；调用方负责。parity 测试直接可用）。"""
+    return _discard_internals(state)['chosen_raw']
+
+
+def belief_labels(state):
+    """单个 State -> 标签 dict（数据生产用；内部与 belief_action 完全同一计算）。
+
+    chosen 直接取 belief_action(state)（含各 phase 行为与合法兜底，一致性由
+    构造保证；XLA CSE 会合并重复子计算）。其余字段见 _discard_internals。
+    """
+    d = _discard_internals(state)
+    return dict(
+        chosen=belief_action(state),
+        top8=d['top8'],
+        offense=d['offense'],
+        danger=d['danger8'],
+        defense_flag=d['signal'],
+        margin=d['margin_f'],
+        best_offense=d['best'],
+    )
 
 
 def _discard_action(state, mask):
